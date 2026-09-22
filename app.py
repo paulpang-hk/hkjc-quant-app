@@ -6,32 +6,32 @@ import requests
 st.set_page_config(page_title="HKJC Quant Cloud Engine", page_icon="🏇", layout="wide")
 st.title("🏇 HKJC Quant Strategy Engine (Cloud Edition)")
 
-st.sidebar.header("⚙️ Cloud Credentials")
-neon_url = st.sidebar.text_input(
-    "Neon Cloud DB Connection String", 
-    value="postgresql://neondb_owner:npg_D2YzinaM8grT@ep-snowy-fire-b59poqzm-pooler.c-7.us-east-2.aws.neon.tech/neondb?sslmode=require", 
-    type="password"
-)
-openrouter_key = st.sidebar.text_input("OpenRouter API Key", value="", type="password")
+default_neon = "postgresql://neondb_owner:npg_D2YzinaM8grT@ep-snowy-fire-b59poqzm-pooler.c-7.us-east-2.aws.neon.tech/neondb?sslmode=require"
 
-@st.cache_resource
-def get_cloud_conn(url):
-    try:
-        return psycopg2.connect(url)
-    except Exception as e:
-        st.error(f"Cloud DB Connection Error: {e}")
-        return None
+# Safe retrieval of OpenRouter secret
+default_or_key = ""
+try:
+    if "OPENROUTER_API_KEY" in st.secrets:
+        default_or_key = st.secrets["OPENROUTER_API_KEY"]
+except Exception:
+    pass
+
+st.sidebar.header("⚙️ Cloud Credentials")
+neon_url = st.sidebar.text_input("Neon Cloud DB Connection String", value=default_neon, type="password")
+openrouter_key = st.sidebar.text_input("OpenRouter API Key", value=default_or_key, type="password")
 
 if neon_url:
-    conn = get_cloud_conn(neon_url)
-    if conn:
-        try:
-            dates_df = pd.read_sql("SELECT DISTINCT race_date FROM model_pwin_results ORDER BY race_date DESC;", conn)
-            available_dates = dates_df['race_date'].astype(str).tolist()
-        except Exception:
-            available_dates = []
+    try:
+        # Establish direct PostgreSQL connection
+        conn = psycopg2.connect(neon_url)
+        
+        # Query distinct dates
+        dates_df = pd.read_sql("SELECT DISTINCT race_date FROM model_pwin_results ORDER BY race_date DESC;", conn)
+        available_dates = dates_df['race_date'].astype(str).tolist()
 
-        if available_dates:
+        if not available_dates:
+            st.warning("⚠️ Connected to Neon Cloud DB, but no race records were found in 'model_pwin_results'.")
+        else:
             c1, c2 = st.columns([2, 1])
             with c1:
                 selected_date = st.selectbox("📅 Select Race Meeting Date", available_dates)
@@ -50,9 +50,9 @@ if neon_url:
             """
             df = pd.read_sql(query, conn)
 
-            if not df.empty():
+            if not df.empty:
                 df["PWIN %"] = (df["PWIN"] * 100).round(2)
-                # If live odds are 0.0 (pre-race), default display odds to Fair Odds
+                # Fallback display odds if live odds are 0.0
                 df["Live Odds"] = df["Live Odds"].apply(lambda x: x if x > 1.0 else 10.0)
 
                 st.markdown(f"### 📊 Racecard Matrix: {selected_date} | Race {selected_race}")
@@ -85,7 +85,7 @@ if neon_url:
 
                 if st.button("🚀 Synthesize Investment Strategy", type="primary"):
                     if not openrouter_key:
-                        st.error("Please enter your OpenRouter API Key in the sidebar.")
+                        st.error("Please paste your OpenRouter API Key in the sidebar.")
                     else:
                         with st.spinner("Calling Gemini 2.5 Flash via OpenRouter..."):
                             try:
@@ -119,3 +119,10 @@ if neon_url:
                                     st.error(f"OpenRouter Error: {res.text}")
                             except Exception as e:
                                 st.error(f"API Execution Error: {e}")
+            else:
+                st.warning(f"No runners found for Race {selected_race} on {selected_date}.")
+
+        conn.close()
+
+    except Exception as e:
+        st.error(f"Database Connection Error: {e}")
