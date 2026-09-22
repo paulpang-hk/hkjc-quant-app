@@ -78,29 +78,33 @@ if neon_url:
                 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
                 st.divider()
-                st.markdown("### 🤖 Gemini Executive Strategist Synthesis (via OpenRouter)")
+                st.markdown("### 🤖 Gemini Executive Strategist Synthesis")
 
                 if st.button("🚀 Synthesize Investment Strategy", type="primary"):
                     if not openrouter_key:
                         st.error("Please enter your OpenRouter API Key in the sidebar.")
                     else:
-                        with st.spinner("Calling Gemini AI via OpenRouter..."):
+                        with st.spinner("Analyzing race matrix..."):
                             try:
                                 payload = {
                                     "model": "google/gemini-2.5-flash",
-                                    "max_tokens": 1000,
+                                    "max_tokens": 400,
                                     "messages": [{
                                         "role": "user",
                                         "content": f"""
-                                        You are an elite HKJC Quantitative Executive Strategist & Betting Portfolio Manager.
+                                        You are an elite HKJC Quant Strategist.
                                         Analyze Race Matrix for Date: {selected_date}, Race: {selected_race}.
-                                        Data: {edited_df[['No.', 'Horse Name', 'Jockey', 'PWIN %', 'Fair Odds', 'Live Odds', 'Expected Value (EV)']].to_json(orient='records')}
+                                        Data: {edited_df[['No.', 'Horse Name', 'PWIN %', 'Fair Odds', 'Live Odds', 'Expected Value (EV)']].to_json(orient='records')}
 
-                                        Provide:
-                                        1. **Top Value Win Bets**: Horses with EV > 0.0 where Live Odds exceed Fair Odds.
-                                        2. **Exotic Combination Suggestions**: Standout Bankers and Leg picks for Quinella (Q) and Tierce (T).
-                                        3. **Risk & Overlay Warnings**: Underlays to avoid.
-                                        4. **Executive Verdict**: 2-sentence summary action plan.
+                                        Generate an ULTRA-CONCISE, punchy summary under 80 words. NO explanations of EV/math, NO preamble.
+
+                                        Format exactly like this:
+                                        🎯 **WIN VALUE (EV > 0)**: [No. Name @ Odds (EV: +X)] or "None"
+                                        🎲 **EXOTIC STRATEGY**:
+                                        • **Banker**: No. Name
+                                        • **Legs**: Nos.
+                                        ⚠️ **BAD OVERLAYS (AVOID)**: Nos.
+                                        🏁 **VERDICT**: [1 direct action sentence]
                                         """
                                     }]
                                 }
@@ -114,7 +118,7 @@ if neon_url:
                                     st.success("Analysis Complete!")
                                     st.markdown(analysis)
                                 else:
-                                    st.error(f"OpenRouter Response Error: {res.text}")
+                                    st.error(f"OpenRouter Error: {res.text}")
                             except Exception as e:
                                 st.error(f"API Execution Error: {e}")
             else:
