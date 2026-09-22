@@ -22,15 +22,12 @@ openrouter_key = st.sidebar.text_input("OpenRouter API Key", value=default_or_ke
 
 if neon_url:
     try:
-        # Establish direct PostgreSQL connection
         conn = psycopg2.connect(neon_url)
-        
-        # Query distinct dates
         dates_df = pd.read_sql("SELECT DISTINCT race_date FROM model_pwin_results ORDER BY race_date DESC;", conn)
         available_dates = dates_df['race_date'].astype(str).tolist()
 
         if not available_dates:
-            st.warning("⚠️ Connected to Neon Cloud DB, but no race records were found in 'model_pwin_results'.")
+            st.warning("⚠️ Connected to Neon Cloud DB, but no race records were found.")
         else:
             c1, c2 = st.columns([2, 1])
             with c1:
@@ -77,7 +74,8 @@ if neon_url:
                     elif val > 0.0: return 'background-color: #e2e3e5; color: #383d41'
                     else: return 'background-color: #f8d7da; color: #721c24'
 
-                styled_df = edited_df[["No.", "Horse Name", "Jockey", "Trainer", "Draw", "PWIN %", "Fair Odds", "Live Odds", "Expected Value (EV)"]].style.applymap(highlight_ev, subset=["Expected Value (EV)"])
+                # Updated for modern Pandas compatibility (.map instead of .applymap)
+                styled_df = edited_df[["No.", "Horse Name", "Jockey", "Trainer", "Draw", "PWIN %", "Fair Odds", "Live Odds", "Expected Value (EV)"]].style.map(highlight_ev, subset=["Expected Value (EV)"])
                 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
                 st.divider()
@@ -85,7 +83,7 @@ if neon_url:
 
                 if st.button("🚀 Synthesize Investment Strategy", type="primary"):
                     if not openrouter_key:
-                        st.error("Please paste your OpenRouter API Key in the sidebar.")
+                        st.error("Please enter your OpenRouter API Key in the sidebar.")
                     else:
                         with st.spinner("Calling Gemini 2.5 Flash via OpenRouter..."):
                             try:
@@ -125,4 +123,4 @@ if neon_url:
         conn.close()
 
     except Exception as e:
-        st.error(f"Database Connection Error: {e}")
+        st.error(f"Application Error: {e}")
