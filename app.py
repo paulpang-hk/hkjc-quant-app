@@ -87,8 +87,8 @@ if neon_url:
                         with st.spinner("Calling Gemini AI via OpenRouter..."):
                             try:
                                 payload = {
-                                    "model": "google/gemini-2.0-flash-001",
-                                    "max_tokens": 1000,  # Limits token footprint to fit OpenRouter free tier
+                                    "model": "google/gemini-2.5-flash",
+                                    "max_tokens": 1000,
                                     "messages": [{
                                         "role": "user",
                                         "content": f"""
