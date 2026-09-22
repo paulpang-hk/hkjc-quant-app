@@ -88,7 +88,7 @@ if neon_url:
                             try:
                                 payload = {
                                     "model": "google/gemini-2.5-flash",
-                                    "max_tokens": 400,
+                                    "max_tokens": 600,
                                     "messages": [{
                                         "role": "user",
                                         "content": f"""
@@ -97,15 +97,25 @@ if neon_url:
                                         Data: {edited_df[['No.', 'Horse Name', 'PWIN %', 'Fair Odds', 'Live Odds', 'Expected Value (EV)']].to_json(orient='records')}
 
                                         Please output EXACTLY in Traditional Chinese (繁體中文) using Hong Kong racing terminology.
-                                        Format the output STRICTLY like this, with NO tables, NO additional text, and NO preamble:
+                                        CRITICAL: Use DOUBLE NEWLINES between every section so Markdown renders each section on a new line!
 
-                                        🎯 **首選投資 (1-2匹)**: [馬號 & 馬名]
-                                        📌 **建議注項**: [獨贏 (WIN) / 位置 (PLACE) / 位置Q (PQ) / 獨贏+位置Q (WIN + PQ)]
-                                        🎲 **位置Q/連贏 策略 (如適用)**:
+                                        Format strictly like this:
+
+                                        ### 🎯 建議投資組合 (Top Investments)
+
+                                        | 馬號 | 馬名 | 勝率 (PWIN %) | 公平賠率 | 即時賠率 | 期望值 (EV) | 建議注項 | 注碼分配 |
+                                        |---|---|---|---|---|---|---|---|
+                                        | [馬號] | [馬名] | [PWIN %] | [Fair Odds] | [Live Odds] | [EV] | [WIN / PLACE / PQ] | [注碼%] |
+
+                                        ### 🎲 連贏/位置Q 策略
+
                                         • **馬膽 (Banker)**: [馬號 & 馬名]
+
                                         • **配腳 (Legs)**: [馬號 & 馬名]
-                                        💰 **注碼分配**: [例如: 70% 獨贏 / 30% 位置Q (拖...)]
-                                        ⚠️ **迴避馬匹 (不值博/高估)**: [填寫所有EV小於0的馬號]
+
+                                        ### ⚠️ 迴避馬匹 (Underlays)
+
+                                        • **不值博馬匹 (EV < 0)**: [列出所有迴避馬號]
                                         """
                                     }]
                                 }
