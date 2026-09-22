@@ -80,11 +80,11 @@ if neon_url:
                 st.divider()
                 st.markdown("### 🤖 Gemini Executive Strategist Synthesis")
 
-                if st.button("🚀 Synthesize Investment Strategy", type="primary"):
+                if st.button("🚀 Synthesize Investment Strategy (AI 策略分析)", type="primary"):
                     if not openrouter_key:
                         st.error("Please enter your OpenRouter API Key in the sidebar.")
                     else:
-                        with st.spinner("Analyzing race matrix..."):
+                        with st.spinner("正在計算最佳投注策略 (Calculating optimal stake strategy)..."):
                             try:
                                 payload = {
                                     "model": "google/gemini-2.5-flash",
@@ -92,19 +92,20 @@ if neon_url:
                                     "messages": [{
                                         "role": "user",
                                         "content": f"""
-                                        You are an elite HKJC Quant Strategist.
+                                        You are an elite HKJC Quant Portfolio Manager.
                                         Analyze Race Matrix for Date: {selected_date}, Race: {selected_race}.
                                         Data: {edited_df[['No.', 'Horse Name', 'PWIN %', 'Fair Odds', 'Live Odds', 'Expected Value (EV)']].to_json(orient='records')}
 
-                                        Generate an ULTRA-CONCISE, punchy summary under 80 words. NO explanations of EV/math, NO preamble.
+                                        Please output EXACTLY in Traditional Chinese (繁體中文) using Hong Kong racing terminology.
+                                        Format the output STRICTLY like this, with NO additional text or preamble:
 
-                                        Format exactly like this:
-                                        🎯 **WIN VALUE (EV > 0)**: [No. Name @ Odds (EV: +X)] or "None"
-                                        🎲 **EXOTIC STRATEGY**:
-                                        • **Banker**: No. Name
-                                        • **Legs**: Nos.
-                                        ⚠️ **BAD OVERLAYS (AVOID)**: Nos.
-                                        🏁 **VERDICT**: [1 direct action sentence]
+                                        🎯 **首選投資 (1-2匹)**: [馬號 & 馬名]
+                                        📌 **建議注項**: [獨贏 (WIN) / 位置 (PLACE) / 位置Q (PQ) / 獨贏+位置Q (WIN + PQ)]
+                                        🎲 **位置Q/連贏 策略 (如適用)**:
+                                        • **馬膽 (Banker)**: [馬號 & 馬名]
+                                        • **配腳 (Legs)**: [馬號 & 馬名]
+                                        💰 **注碼分配**: [例如: 70% 獨贏 / 30% 位置Q 平均分配]
+                                        ⚠️ **迴避馬匹 (不值博/高估)**: [馬號]
                                         """
                                     }]
                                 }
@@ -115,7 +116,7 @@ if neon_url:
                                 res = requests.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers=headers, timeout=15)
                                 if res.status_code == 200:
                                     analysis = res.json()["choices"][0]["message"]["content"]
-                                    st.success("Analysis Complete!")
+                                    st.success("分析完成 (Analysis Complete)!")
                                     st.markdown(analysis)
                                 else:
                                     st.error(f"OpenRouter Error: {res.text}")
