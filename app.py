@@ -74,7 +74,6 @@ if neon_url:
                     elif val > 0.0: return 'background-color: #e2e3e5; color: #383d41'
                     else: return 'background-color: #f8d7da; color: #721c24'
 
-                # Updated for modern Pandas compatibility (.map instead of .applymap)
                 styled_df = edited_df[["No.", "Horse Name", "Jockey", "Trainer", "Draw", "PWIN %", "Fair Odds", "Live Odds", "Expected Value (EV)"]].style.map(highlight_ev, subset=["Expected Value (EV)"])
                 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
@@ -85,10 +84,11 @@ if neon_url:
                     if not openrouter_key:
                         st.error("Please enter your OpenRouter API Key in the sidebar.")
                     else:
-                        with st.spinner("Calling Gemini 2.5 Flash via OpenRouter..."):
+                        with st.spinner("Calling Gemini AI via OpenRouter..."):
                             try:
                                 payload = {
-                                    "model": "google/gemini-2.5-flash",
+                                    "model": "google/gemini-2.0-flash-001",
+                                    "max_tokens": 1000,  # Limits token footprint to fit OpenRouter free tier
                                     "messages": [{
                                         "role": "user",
                                         "content": f"""
@@ -114,7 +114,7 @@ if neon_url:
                                     st.success("Analysis Complete!")
                                     st.markdown(analysis)
                                 else:
-                                    st.error(f"OpenRouter Error: {res.text}")
+                                    st.error(f"OpenRouter Response Error: {res.text}")
                             except Exception as e:
                                 st.error(f"API Execution Error: {e}")
             else:
