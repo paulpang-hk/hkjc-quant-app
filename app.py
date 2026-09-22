@@ -49,7 +49,12 @@ if neon_url:
 
             if not df.empty:
                 df["PWIN %"] = (df["PWIN"] * 100).round(2)
-                # Fallback display odds if live odds are 0.0
+                
+                # Check if live odds are synced
+                has_live_odds = (df["Live Odds"] > 1.0).any()
+                if not has_live_odds:
+                    st.warning("⚠️ Live Odds not synced yet. Showing baseline model matrix (10.0 fallback). Trigger HKJC_02_Cloud_Sync_Odd in Synology to fetch real odds.")
+
                 df["Live Odds"] = df["Live Odds"].apply(lambda x: x if x > 1.0 else 10.0)
 
                 st.markdown(f"### 📊 Racecard Matrix: {selected_date} | Race {selected_race}")
@@ -97,7 +102,9 @@ if neon_url:
                                         Data: {edited_df[['No.', 'Horse Name', 'PWIN %', 'Fair Odds', 'Live Odds', 'Expected Value (EV)']].to_json(orient='records')}
 
                                         Please output EXACTLY in Traditional Chinese (繁體中文) using Hong Kong racing terminology.
-                                        CRITICAL: Use DOUBLE NEWLINES between every section so Markdown renders each section on a new line!
+                                        CRITICAL:
+                                        1. Do NOT put horses chosen as Banker or Legs into the "Underlays to Avoid" list!
+                                        2. Use DOUBLE NEWLINES between every section so Markdown renders properly.
 
                                         Format strictly like this:
 
@@ -113,9 +120,9 @@ if neon_url:
 
                                         • **配腳 (Legs)**: [馬號 & 馬名]
 
-                                        ### ⚠️ 迴避馬匹 (Underlays)
+                                        ### ⚠️ 迴避馬匹 (Severe Underlays)
 
-                                        • **不值博馬匹 (EV < 0)**: [列出所有迴避馬號]
+                                        • **不值博馬匹 (EV < 0，排除已選配腳)**: [列出其餘嚴重偏低/不值博之馬號]
                                         """
                                     }]
                                 }
