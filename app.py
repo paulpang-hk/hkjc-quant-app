@@ -79,7 +79,7 @@ if neon_url:
                                     
                                     vision_payload = {
                                         "model": "google/gemini-2.5-flash",
-                                        "max_tokens": 300,  # Prevents high-token credit reservation errors
+                                        "max_tokens": 300,
                                         "messages": [{
                                             "role": "user",
                                             "content": [
@@ -153,12 +153,30 @@ if neon_url:
                     hide_index=True, use_container_width=True
                 )
 
-                # --- MARKET PROBABILITY BLENDING & CALIBRATION ENGINE ---
+                # =========================================================================
+                # DYNAMIC MARKET PROBABILITY BLENDING & CALIBRATION ENGINE
+                # =========================================================================
                 edited_df["Raw PWIN"] = edited_df["PWIN %"] / 100.0
                 edited_df["Market Implied PWIN"] = 1.0 / edited_df["Live Odds"]
 
-                # Blend Model PWIN (50%) with Market Implied PWIN (50%)
-                edited_df["Calibrated PWIN"] = (0.50 * edited_df["Raw PWIN"]) + (0.50 * edited_df["Market Implied PWIN"])
+                def calc_calibrated_pwin(row):
+                    raw_pwin = row["Raw PWIN"]
+                    market_pwin = row["Market Implied PWIN"]
+                    odds = row["Live Odds"]
+                    
+                    # Favorites & Contenders (Odds <= 8.0): Give 60% weight to market signals ("smart money")
+                    if odds <= 8.0:
+                        w_market = 0.60
+                    # Mid-tier runners (8.0 < Odds <= 25.0): Balanced 50/50 blend
+                    elif odds <= 25.0:
+                        w_market = 0.50
+                    # Longshots (Odds > 25.0): Reduce market weight to 30% to prevent noisy odds spikes
+                    else:
+                        w_market = 0.30
+                        
+                    return (w_market * market_pwin) + ((1.0 - w_market) * raw_pwin)
+
+                edited_df["Calibrated PWIN"] = edited_df.apply(calc_calibrated_pwin, axis=1)
                 edited_df["Calibrated PWIN %"] = (edited_df["Calibrated PWIN"] * 100.0).round(2)
                 edited_df["Calibrated Fair Odds"] = (1.0 / edited_df["Calibrated PWIN"]).round(2)
 
@@ -176,6 +194,34 @@ if neon_url:
 
                 styled_df = edited_df[["No.", "Horse Name", "Jockey", "Trainer", "Draw", "PWIN %", "Calibrated PWIN %", "Calibrated Fair Odds", "Live Odds", "Expected Value (EV)"]].style.map(highlight_ev, subset=["Expected Value (EV)"])
                 st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+                # =========================================================================
+                # HARVILLE QUINELLA (連贏) COMBINATION GENERATOR
+                # =========================================================================
+                st.markdown("#### 🎲 Top Model Quinella (連贏) Combinations")
+                quinella_pairs = []
+                runners = edited_df.to_dict('records')
+
+                for i in range(len(runners)):
+                    for j in range(i + 1, len(runners)):
+                        h1, h2 = runners[i], runners[j]
+                        p1, p2 = h1["Calibrated PWIN"], h2["Calibrated PWIN"]
+                        
+                        # Harville Formula for Quinella Probability P(1st=A, 2nd=B) + P(1st=B, 2nd=A)
+                        if (1.0 - p1) > 0 and (1.0 - p2) > 0:
+                            p_q = (p1 * (p2 / (1.0 - p1))) + (p2 * (p1 / (1.0 - p2)))
+                        else:
+                            p_q = 0.0
+                        
+                        quinella_pairs.append({
+                            "Pair": f"#{int(h1['No.'])} - #{int(h2['No.'])}",
+                            "Combo": f"{h1['Horse Name']} / {h2['Horse Name']}",
+                            "Est Q Prob %": round(p_q * 100, 2),
+                            "Combined Fair Odds": round(1.0 / p_q, 2) if p_q > 0 else 999.0
+                        })
+
+                q_df = pd.DataFrame(quinella_pairs).sort_values(by="Est Q Prob %", ascending=False).head(5)
+                st.dataframe(q_df, use_container_width=True, hide_index=True)
 
                 st.divider()
                 st.markdown("### 🤖 Gemini Executive Strategist Synthesis")
@@ -201,6 +247,7 @@ if neon_url:
 You are an elite HKJC Quant Portfolio Manager operating with strict risk management discipline.
 Analyze Race Matrix for Date: {selected_date}, Race: {selected_race}.
 Data: {edited_df[['No.', 'Horse Name', 'Calibrated PWIN %', 'Calibrated Fair Odds', 'Live Odds', 'Expected Value (EV)']].to_json(orient='records')}
+Top Quinella Combos: {q_df.to_json(orient='records')}
 
 STRICT QUANT STRATEGY RULES:
 1. Positive EV Filter: ONLY recommend a WIN / PLACE / PQ bet if Expected Value (EV) >= +0.10 and Calibrated PWIN % >= 8.5%.
@@ -234,7 +281,7 @@ Format strictly like this:
                                     "Authorization": f"Bearer {openrouter_key}",
                                     "Content-Type": "application/json"
                                 }
-                                res = requests.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers=headers, timeout=15)
+                                res = requests.post("https://openrouter.ai/ai/v1/chat/completions", json=payload, headers=headers, timeout=15)
                                 if res.status_code == 200:
                                     analysis = res.json()["choices"][0]["message"]["content"]
                                     st.success("分析完成 (Analysis Complete)!")
