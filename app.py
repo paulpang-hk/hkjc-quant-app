@@ -71,17 +71,30 @@ if neon_url:
                     hide_index=True, use_container_width=True
                 )
 
-                # Compute Expected Value (EV)
-                edited_df["PWIN"] = edited_df["PWIN %"] / 100.0
-                edited_df["Expected Value (EV)"] = ((edited_df["PWIN"] * edited_df["Live Odds"]) - 1.0).round(3)
+                # =========================================================================
+                # MARKET PROBABILITY BLENDING & CALIBRATION ENGINE
+                # =========================================================================
+                edited_df["Raw PWIN"] = edited_df["PWIN %"] / 100.0
+                edited_df["Market Implied PWIN"] = 1.0 / edited_df["Live Odds"]
 
-                st.markdown("### 🎯 Value Analysis & Overlays")
+                # Blend Model PWIN (50%) with Market Implied PWIN (50%) to anchor longshots
+                edited_df["Calibrated PWIN"] = (0.50 * edited_df["Raw PWIN"]) + (0.50 * edited_df["Market Implied PWIN"])
+                edited_df["Calibrated PWIN %"] = (edited_df["Calibrated PWIN"] * 100.0).round(2)
+                edited_df["Calibrated Fair Odds"] = (1.0 / edited_df["Calibrated PWIN"]).round(2)
+
+                # Compute Calibrated Expected Value (EV)
+                edited_df["Expected Value (EV)"] = ((edited_df["Calibrated PWIN"] * edited_df["Live Odds"]) - 1.0).round(3)
+
+                # Guardrail: Cap extreme longshots (> 35.0 odds) from generating fake positive EV
+                edited_df.loc[edited_df["Live Odds"] > 35.0, "Expected Value (EV)"] = -0.999
+
+                st.markdown("### 🎯 Value Analysis & Overlays (Calibrated)")
                 def highlight_ev(val):
                     if val > 0.15: return 'background-color: #d4edda; color: #155724; font-weight: bold'
                     elif val > 0.0: return 'background-color: #e2e3e5; color: #383d41'
                     else: return 'background-color: #f8d7da; color: #721c24'
 
-                styled_df = edited_df[["No.", "Horse Name", "Jockey", "Trainer", "Draw", "PWIN %", "Fair Odds", "Live Odds", "Expected Value (EV)"]].style.map(highlight_ev, subset=["Expected Value (EV)"])
+                styled_df = edited_df[["No.", "Horse Name", "Jockey", "Trainer", "Draw", "PWIN %", "Calibrated PWIN %", "Calibrated Fair Odds", "Live Odds", "Expected Value (EV)"]].style.map(highlight_ev, subset=["Expected Value (EV)"])
                 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
                 st.divider()
@@ -101,7 +114,7 @@ if neon_url:
                             "1. Double-click the cells in the **Live Odds (Board)** table to enter actual board odds manually, OR\n"
                             "2. Trigger `HKJC_02_Cloud_Sync_Odd` in Synology Task Scheduler when HKJC tote selling is open."
                         )
-                        st.stop()  # Halt execution cleanly
+                        st.stop()  # Halt script execution immediately
                     # =========================================================================
 
                     if not openrouter_key:
@@ -117,14 +130,14 @@ if neon_url:
                                         "content": f"""
 You are an elite HKJC Quant Portfolio Manager operating with strict risk management discipline.
 Analyze Race Matrix for Date: {selected_date}, Race: {selected_race}.
-Data: {edited_df[['No.', 'Horse Name', 'PWIN %', 'Fair Odds', 'Live Odds', 'Expected Value (EV)']].to_json(orient='records')}
+Data: {edited_df[['No.', 'Horse Name', 'Calibrated PWIN %', 'Calibrated Fair Odds', 'Live Odds', 'Expected Value (EV)']].to_json(orient='records')}
 
 STRICT QUANT STRATEGY RULES:
-1. Positive EV Filter: ONLY recommend a WIN / PLACE / PQ bet if Expected Value (EV) >= +0.10 and PWIN % >= 10.0%.
+1. Positive EV Filter: ONLY recommend a WIN / PLACE / PQ bet if Expected Value (EV) >= +0.10 and Calibrated PWIN % >= 8.5%.
 2. PASS RACE / NO BET RULE: If NO horse has EV >= +0.10, or if all EV values are negative/weak, output "本場無值博馬匹，建議觀望 / 棄注 (NO BET / PASS)". Do NOT force bets on negative EV runners.
-3. Banker (馬膽) Selection: Pick the highest EV horse with PWIN >= 10.0% as Banker. If none meet the criteria, output "無 (None)".
-4. Legs (配腳) Selection: Pick 2 to 4 horses with positive EV or top-3 model PWIN %. Do NOT select the Banker as a Leg.
-5. Avoid List (迴避馬匹): List horses with EV < -0.10 or severely overbet underlays (Live Odds < Fair Odds without sufficient win probability), excluding Banker & Legs.
+3. Banker (馬膽) Selection: Pick the highest EV horse with Calibrated PWIN >= 8.5% as Banker. If none meet the criteria, output "無 (None)".
+4. Legs (配腳) Selection: Pick 2 to 4 horses with positive EV or top Calibrated PWIN %. Do NOT select the Banker as a Leg.
+5. Avoid List (迴避馬匹): List horses with EV < 0 or severely overbet underlays (Live Odds < Calibrated Fair Odds without sufficient win probability), excluding Banker & Legs.
 6. Language & Formatting: Output STRICTLY in Traditional Chinese (繁體中文) using Hong Kong racing terminology. Use DOUBLE NEWLINES between every section so Markdown renders properly.
 
 Format strictly like this:
@@ -133,7 +146,7 @@ Format strictly like this:
 
 | 馬號 | 馬名 | 勝率 (PWIN %) | 公平賠率 | 即時賠率 | 期望值 (EV) | 建議注項 | 注碼分配 |
 |---|---|---|---|---|---|---|---|
-| [馬號] | [馬名] | [PWIN %] | [Fair Odds] | [Live Odds] | [EV] | [WIN / PLACE / PQ / 觀望] | [注碼%] |
+| [馬號] | [馬名] | [Calibrated PWIN %] | [Fair Odds] | [Live Odds] | [EV] | [WIN / PLACE / PQ / 觀望] | [注碼%] |
 
 ### 🎲 連贏/位置Q 策略
 
