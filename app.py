@@ -2,6 +2,8 @@ import psycopg2
 import pandas as pd
 import requests
 import streamlit as st
+import json
+import base64
 
 st.set_page_config(page_title="HKJC Quant Cloud Engine", page_icon="🏇", layout="wide")
 st.title("🏇 HKJC Quant Strategy Engine (Cloud Edition)")
@@ -20,6 +22,26 @@ st.sidebar.header("⚙️ Cloud Credentials")
 neon_url = st.sidebar.text_input("Neon Cloud DB Connection String", value=default_neon, type="password")
 openrouter_key = st.sidebar.text_input("OpenRouter API Key", value=default_or_key, type="password")
 
+def update_odds_in_neon(conn_url, r_date, r_no, odds_dict):
+    """Batch updates live odds in Neon Cloud DB from a dictionary {horse_no: odds_val}"""
+    try:
+        cloud_conn = psycopg2.connect(conn_url)
+        cloud_cur = cloud_conn.cursor()
+        count = 0
+        for h_no, o_val in odds_dict.items():
+            cloud_cur.execute("""
+                UPDATE model_pwin_results 
+                SET live_odds = %s 
+                WHERE race_date = %s AND race_no = %s AND horse_no = %s;
+            """, (float(o_val), r_date, r_no, int(h_no)))
+            count += 1
+        cloud_conn.commit()
+        cloud_cur.close(); cloud_conn.close()
+        return count
+    except Exception as e:
+        st.error(f"Failed to update Neon Cloud DB: {e}")
+        return 0
+
 if neon_url:
     try:
         conn = psycopg2.connect(neon_url)
@@ -35,6 +57,65 @@ if neon_url:
             with c2:
                 selected_race = st.selectbox("🏁 Select Race Number", list(range(1, 12)), index=0)
 
+            # =========================================================================
+            # FAST ODDS INGESTION PANEL (SCREENSHOT OCR + QUICK PASTE)
+            # =========================================================================
+            with st.expander("⚡ **Fast Live Odds Manual / Screenshot Sync (Click to Open)**", expanded=False):
+                tab1, tab2 = st.tabs(["📸 Upload Odds Screenshot (AI OCR)", "✍️ Quick String Paste"])
+
+                # --- TAB 1: SCREENSHOT OCR ---
+                with tab1:
+                    st.write("Upload a screenshot of the HKJC live odds board. Gemini will read the odds and sync Neon Cloud DB automatically.")
+                    uploaded_img = st.file_uploader("Choose HKJC Odds Screenshot...", type=["png", "jpg", "jpeg", "webp"])
+                    if uploaded_img and st.button("🔍 Parse Screenshot & Sync to Cloud DB"):
+                        if not openrouter_key:
+                            st.error("Please enter your OpenRouter API Key in the sidebar.")
+                        else:
+                            with st.spinner("Gemini is reading screenshot and extracting live odds..."):
+                                try:
+                                    img_bytes = uploaded_img.read()
+                                    base64_img = base64.b64encode(img_bytes).decode('utf-8')
+                                    
+                                    vision_payload = {
+                                        "model": "google/gemini-2.5-flash",
+                                        "messages": [{
+                                            "role": "user",
+                                            "content": [
+                                                {"type": "text", "text": "Extract all horse numbers and their current WIN odds from this HKJC board screenshot. Output strictly a JSON object where keys are horse numbers as strings and values are float odds. Example: {\"1\": 3.5, \"2\": 12.0, \"3\": 8.5}. Output ONLY JSON."},
+                                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
+                                            ]
+                                        }]
+                                    }
+                                    v_res = requests.post("https://openrouter.ai/api/v1/chat/completions", json=vision_payload, headers={"Authorization": f"Bearer {openrouter_key}", "Content-Type": "application/json"}, timeout=20)
+                                    if v_res.status_code == 200:
+                                        raw_json_str = v_res.json()["choices"][0]["message"]["content"].replace("```json", "").replace("```", "").strip()
+                                        parsed_dict = json.loads(raw_json_str)
+                                        updated_n = update_odds_in_neon(neon_url, selected_date, selected_race, parsed_dict)
+                                        st.success(f"✅ Successfully read screenshot and updated {updated_n} horses in Neon Cloud DB!")
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Vision API Error: {v_res.text}")
+                                except Exception as ve:
+                                    st.error(f"Screenshot Processing Error: {ve}")
+
+                # --- TAB 2: QUICK PASTE STRING ---
+                with tab2:
+                    st.write("Format example: `1=3.5; 2=8.2; 3=14.0; 4=5.1` or `1:3.5, 2:8.2, 3:14.0`")
+                    paste_str = st.text_input("Paste Odds String:", placeholder="1=3.5; 2=8.2; 3=14.0; 4=5.1")
+                    if st.button("🚀 Push Pasted Odds to Cloud DB"):
+                        if paste_str:
+                            pairs = re.findall(r'(\d{1,2})\s*[:=,\s-]\s*([\d\.]+)', paste_str)
+                            if pairs:
+                                parsed_dict = {p[0]: float(p[1]) for p in pairs}
+                                updated_n = update_odds_in_neon(neon_url, selected_date, selected_race, parsed_dict)
+                                st.success(f"✅ Successfully updated {updated_n} horses in Neon Cloud DB!")
+                                st.rerun()
+                            else:
+                                st.error("Could not parse numbers from string. Use format like: `1=3.5; 2=8.2; 3=14.0`")
+
+            # =========================================================================
+            # MAIN RACECARD QUERY
+            # =========================================================================
             query = f"""
                 SELECT 
                     horse_no AS "No.", horse_name AS "Horse Name", brand_code AS "Brand",
@@ -50,12 +131,11 @@ if neon_url:
             if not df.empty:
                 df["PWIN %"] = (df["PWIN"] * 100).round(2)
                 
-                # Check if live odds are properly synced
                 raw_live_odds = df["Live Odds"]
                 is_dummy_odds = (raw_live_odds == 10.0).all() or (raw_live_odds == 0.0).all() or raw_live_odds.isna().all()
 
                 if is_dummy_odds:
-                    st.warning("⚠️ **Live Odds Not Synced!** Showing baseline matrix (10.0 default). Double-click table cells to enter manual odds, or run `HKJC_02_Cloud_Sync_Odd` in Synology.")
+                    st.warning("⚠️ **Live Odds Not Synced!** Upload a screenshot above or enter manual odds below.")
 
                 df["Live Odds"] = df["Live Odds"].apply(lambda x: x if (pd.notna(x) and x > 1.0) else 10.0)
 
@@ -71,13 +151,11 @@ if neon_url:
                     hide_index=True, use_container_width=True
                 )
 
-                # =========================================================================
-                # MARKET PROBABILITY BLENDING & CALIBRATION ENGINE
-                # =========================================================================
+                # --- MARKET PROBABILITY BLENDING & CALIBRATION ENGINE ---
                 edited_df["Raw PWIN"] = edited_df["PWIN %"] / 100.0
                 edited_df["Market Implied PWIN"] = 1.0 / edited_df["Live Odds"]
 
-                # Blend Model PWIN (50%) with Market Implied PWIN (50%) to anchor longshots
+                # Blend Model PWIN (50%) with Market Implied PWIN (50%)
                 edited_df["Calibrated PWIN"] = (0.50 * edited_df["Raw PWIN"]) + (0.50 * edited_df["Market Implied PWIN"])
                 edited_df["Calibrated PWIN %"] = (edited_df["Calibrated PWIN"] * 100.0).round(2)
                 edited_df["Calibrated Fair Odds"] = (1.0 / edited_df["Calibrated PWIN"]).round(2)
@@ -101,21 +179,11 @@ if neon_url:
                 st.markdown("### 🤖 Gemini Executive Strategist Synthesis")
 
                 if st.button("🚀 Synthesize Investment Strategy (AI 策略分析)", type="primary"):
-                    # =========================================================================
-                    # GUARDRAIL 1: HARD STOP ON UNSYNCED / DUMMY ODDS
-                    # =========================================================================
                     current_odds = edited_df["Live Odds"]
                     if (current_odds == 10.0).all() or (current_odds == 0.0).all():
                         st.error("🛑 **Strategy Engine Halted: Live Odds Not Synced**")
-                        st.warning(
-                            "Live tote odds have not synced from HKJC (currently showing placeholder 10.0). "
-                            "Calculating Expected Value (EV) on dummy odds creates false positive signals and guarantees bad bets.\n\n"
-                            "**How to fix:**\n"
-                            "1. Double-click the cells in the **Live Odds (Board)** table to enter actual board odds manually, OR\n"
-                            "2. Trigger `HKJC_02_Cloud_Sync_Odd` in Synology Task Scheduler when HKJC tote selling is open."
-                        )
-                        st.stop()  # Halt script execution immediately
-                    # =========================================================================
+                        st.warning("Live odds are showing baseline defaults. Upload a screenshot above or enter manual odds first.")
+                        st.stop()
 
                     if not openrouter_key:
                         st.error("Please enter your OpenRouter API Key in the sidebar.")
