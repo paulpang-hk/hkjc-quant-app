@@ -207,7 +207,7 @@ if neon_url:
                         h1, h2 = runners[i], runners[j]
                         p1, p2 = h1["Calibrated PWIN"], h2["Calibrated PWIN"]
                         
-                        # Harville Formula for Quinella Probability
+                        # Harville Formula for Quinella Probability P(1st=A, 2nd=B) + P(1st=B, 2nd=A)
                         if (1.0 - p1) > 0 and (1.0 - p2) > 0:
                             p_q = (p1 * (p2 / (1.0 - p1))) + (p2 * (p1 / (1.0 - p2)))
                         else:
@@ -240,22 +240,23 @@ if neon_url:
                             try:
                                 payload = {
                                     "model": "google/gemini-2.5-flash",
-                                    "max_tokens": 700,
+                                    "max_tokens": 750,
                                     "messages": [{
                                         "role": "user",
                                         "content": f"""
 You are an elite HKJC Quant Portfolio Manager operating with strict risk management discipline.
 Analyze Race Matrix for Date: {selected_date}, Race: {selected_race}.
-Data: {edited_df[['No.', 'Horse Name', 'Calibrated PWIN %', 'Calibrated Fair Odds', 'Live Odds', 'Expected Value (EV)']].to_json(orient='records')}
-Top Quinella Combos: {q_df.to_json(orient='records')}
+Single Runner Data: {edited_df[['No.', 'Horse Name', 'Calibrated PWIN %', 'Calibrated Fair Odds', 'Live Odds', 'Expected Value (EV)']].to_json(orient='records')}
+Top Harville Quinella Combos: {q_df.to_json(orient='records')}
 
 STRICT QUANT STRATEGY RULES:
-1. Positive EV Filter: ONLY recommend a WIN / PLACE / PQ bet if Expected Value (EV) >= +0.10 and Calibrated PWIN % >= 8.5%.
-2. PASS RACE / NO BET RULE: If NO horse has EV >= +0.10, or if all EV values are negative/weak, output "本場無值博馬匹，建議觀望 / 棄注 (NO BET / PASS)". Do NOT force bets on negative EV runners.
-3. Banker (馬膽) Selection: Pick the highest EV horse with Calibrated PWIN >= 8.5% as Banker. If none meet the criteria, output "無 (None)".
-4. Legs (配腳) Selection: Pick 2 to 4 horses with positive EV or top Calibrated PWIN %. Do NOT select the Banker as a Leg.
-5. Avoid List (迴避馬匹): List horses with EV < 0 or severely overbet underlays (Live Odds < Calibrated Fair Odds without sufficient win probability), excluding Banker & Legs.
-6. Language & Formatting: Output STRICTLY in Traditional Chinese (繁體中文) using Hong Kong racing terminology. Use DOUBLE NEWLINES between every section so Markdown renders properly.
+1. WIN Bet Filter: ONLY recommend a WIN bet if single-runner Expected Value (EV) >= +0.10 and Calibrated PWIN % >= 8.5%.
+2. QUINELLA / PLACE Q BANKER RULE (連贏/位置Q 膽拖策略):
+   - Check the 'Top Harville Quinella Combos' table.
+   - If a specific horse appears as an anchor in 3 or more of the top 5 Quinella pairs (e.g., #2 appearing in 2-5, 2-8, 2-9, 2-7), you MUST nominate that horse as the Quinella Banker (連贏馬膽), even if its single WIN PWIN < 8.5%.
+   - Select the corresponding paired numbers as Legs (配腳).
+3. PASS RACE RULE: If NO horse meets single WIN EV criteria AND no single horse dominates the top Quinella combos, output "本場無值博馬匹，建議觀望 / 棄注 (PASS)".
+4. Language & Formatting: Output STRICTLY in Traditional Chinese (繁體中文) using Hong Kong racing terminology. Use DOUBLE NEWLINES between every section so Markdown renders properly.
 
 Format strictly like this:
 
@@ -263,13 +264,15 @@ Format strictly like this:
 
 | 馬號 | 馬名 | 勝率 (PWIN %) | 公平賠率 | 即時賠率 | 期望值 (EV) | 建議注項 | 注碼分配 |
 |---|---|---|---|---|---|---|---|
-| [馬號] | [馬名] | [Calibrated PWIN %] | [Fair Odds] | [Live Odds] | [EV] | [WIN / PLACE / PQ / 觀望] | [注碼%] |
+| [馬號] | [馬名] | [Calibrated PWIN %] | [Fair Odds] | [Live Odds] | [EV] | [WIN / Q / PQ / 觀望] | [注碼%] |
 
-### 🎲 連贏/位置Q 策略
+### 🎲 連贏/位置Q 策略 (Quinella & Place Q)
 
-• **馬膽 (Banker)**: [馬號 & 馬名 or 無]
+• **馬膽 (Banker)**: [馬號 & 馬名]
 
-• **配腳 (Legs)**: [馬號 & 馬名 or 無]
+• **配腳 (Legs)**: [馬號 & 馬名]
+
+• **建議組合**: [例如：2 號 膽 拖 5, 7, 8, 9 ( Q 及 PQ )]
 
 ### ⚠️ 迴避馬匹 (Severe Underlays)
 
@@ -281,7 +284,6 @@ Format strictly like this:
                                     "Authorization": f"Bearer {openrouter_key}",
                                     "Content-Type": "application/json"
                                 }
-                                # FIXED ENDPOINT URL: api/v1/chat/completions
                                 res = requests.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers=headers, timeout=15)
                                 if res.status_code == 200:
                                     analysis = res.json()["choices"][0]["message"]["content"]
