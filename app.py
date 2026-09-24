@@ -1,7 +1,7 @@
-import streamlit as st
 import psycopg2
 import pandas as pd
 import requests
+import streamlit as st
 
 st.set_page_config(page_title="HKJC Quant Cloud Engine", page_icon="🏇", layout="wide")
 st.title("🏇 HKJC Quant Strategy Engine (Cloud Edition)")
@@ -50,12 +50,14 @@ if neon_url:
             if not df.empty:
                 df["PWIN %"] = (df["PWIN"] * 100).round(2)
                 
-                # Check if live odds are synced
-                has_live_odds = (df["Live Odds"] > 1.0).any()
-                if not has_live_odds:
-                    st.warning("⚠️ Live Odds not synced yet. Showing baseline model matrix (10.0 fallback). Trigger HKJC_02_Cloud_Sync_Odd in Synology to fetch real odds.")
+                # Check if live odds are properly synced
+                raw_live_odds = df["Live Odds"]
+                is_dummy_odds = (raw_live_odds == 10.0).all() or (raw_live_odds == 0.0).all() or raw_live_odds.isna().all()
 
-                df["Live Odds"] = df["Live Odds"].apply(lambda x: x if x > 1.0 else 10.0)
+                if is_dummy_odds:
+                    st.warning("⚠️ **Live Odds Not Synced!** Showing baseline matrix (10.0 default). Double-click table cells to enter manual odds, or run `HKJC_02_Cloud_Sync_Odd` in Synology.")
+
+                df["Live Odds"] = df["Live Odds"].apply(lambda x: x if (pd.notna(x) and x > 1.0) else 10.0)
 
                 st.markdown(f"### 📊 Racecard Matrix: {selected_date} | Race {selected_race}")
 
@@ -86,6 +88,22 @@ if neon_url:
                 st.markdown("### 🤖 Gemini Executive Strategist Synthesis")
 
                 if st.button("🚀 Synthesize Investment Strategy (AI 策略分析)", type="primary"):
+                    # =========================================================================
+                    # GUARDRAIL 1: HARD STOP ON UNSYNCED / DUMMY ODDS
+                    # =========================================================================
+                    current_odds = edited_df["Live Odds"]
+                    if (current_odds == 10.0).all() or (current_odds == 0.0).all():
+                        st.error("🛑 **Strategy Engine Halted: Live Odds Not Synced**")
+                        st.warning(
+                            "Live tote odds have not synced from HKJC (currently showing placeholder 10.0). "
+                            "Calculating Expected Value (EV) on dummy odds creates false positive signals and guarantees bad bets.\n\n"
+                            "**How to fix:**\n"
+                            "1. Double-click the cells in the **Live Odds (Board)** table to enter actual board odds manually, OR\n"
+                            "2. Trigger `HKJC_02_Cloud_Sync_Odd` in Synology Task Scheduler when HKJC tote selling is open."
+                        )
+                        st.stop()  # Halt execution cleanly
+                    # =========================================================================
+
                     if not openrouter_key:
                         st.error("Please enter your OpenRouter API Key in the sidebar.")
                     else:
@@ -93,37 +111,40 @@ if neon_url:
                             try:
                                 payload = {
                                     "model": "google/gemini-2.5-flash",
-                                    "max_tokens": 600,
+                                    "max_tokens": 700,
                                     "messages": [{
                                         "role": "user",
                                         "content": f"""
-                                        You are an elite HKJC Quant Portfolio Manager.
-                                        Analyze Race Matrix for Date: {selected_date}, Race: {selected_race}.
-                                        Data: {edited_df[['No.', 'Horse Name', 'PWIN %', 'Fair Odds', 'Live Odds', 'Expected Value (EV)']].to_json(orient='records')}
+You are an elite HKJC Quant Portfolio Manager operating with strict risk management discipline.
+Analyze Race Matrix for Date: {selected_date}, Race: {selected_race}.
+Data: {edited_df[['No.', 'Horse Name', 'PWIN %', 'Fair Odds', 'Live Odds', 'Expected Value (EV)']].to_json(orient='records')}
 
-                                        Please output EXACTLY in Traditional Chinese (繁體中文) using Hong Kong racing terminology.
-                                        CRITICAL:
-                                        1. Do NOT put horses chosen as Banker or Legs into the "Underlays to Avoid" list!
-                                        2. Use DOUBLE NEWLINES between every section so Markdown renders properly.
+STRICT QUANT STRATEGY RULES:
+1. Positive EV Filter: ONLY recommend a WIN / PLACE / PQ bet if Expected Value (EV) >= +0.10 and PWIN % >= 10.0%.
+2. PASS RACE / NO BET RULE: If NO horse has EV >= +0.10, or if all EV values are negative/weak, output "本場無值博馬匹，建議觀望 / 棄注 (NO BET / PASS)". Do NOT force bets on negative EV runners.
+3. Banker (馬膽) Selection: Pick the highest EV horse with PWIN >= 10.0% as Banker. If none meet the criteria, output "無 (None)".
+4. Legs (配腳) Selection: Pick 2 to 4 horses with positive EV or top-3 model PWIN %. Do NOT select the Banker as a Leg.
+5. Avoid List (迴避馬匹): List horses with EV < -0.10 or severely overbet underlays (Live Odds < Fair Odds without sufficient win probability), excluding Banker & Legs.
+6. Language & Formatting: Output STRICTLY in Traditional Chinese (繁體中文) using Hong Kong racing terminology. Use DOUBLE NEWLINES between every section so Markdown renders properly.
 
-                                        Format strictly like this:
+Format strictly like this:
 
-                                        ### 🎯 建議投資組合 (Top Investments)
+### 🎯 建議投資組合 (Top Investments)
 
-                                        | 馬號 | 馬名 | 勝率 (PWIN %) | 公平賠率 | 即時賠率 | 期望值 (EV) | 建議注項 | 注碼分配 |
-                                        |---|---|---|---|---|---|---|---|
-                                        | [馬號] | [馬名] | [PWIN %] | [Fair Odds] | [Live Odds] | [EV] | [WIN / PLACE / PQ] | [注碼%] |
+| 馬號 | 馬名 | 勝率 (PWIN %) | 公平賠率 | 即時賠率 | 期望值 (EV) | 建議注項 | 注碼分配 |
+|---|---|---|---|---|---|---|---|
+| [馬號] | [馬名] | [PWIN %] | [Fair Odds] | [Live Odds] | [EV] | [WIN / PLACE / PQ / 觀望] | [注碼%] |
 
-                                        ### 🎲 連贏/位置Q 策略
+### 🎲 連贏/位置Q 策略
 
-                                        • **馬膽 (Banker)**: [馬號 & 馬名]
+• **馬膽 (Banker)**: [馬號 & 馬名 or 無]
 
-                                        • **配腳 (Legs)**: [馬號 & 馬名]
+• **配腳 (Legs)**: [馬號 & 馬名 or 無]
 
-                                        ### ⚠️ 迴避馬匹 (Severe Underlays)
+### ⚠️ 迴避馬匹 (Severe Underlays)
 
-                                        • **不值博馬匹 (EV < 0，排除已選配腳)**: [列出其餘嚴重偏低/不值博之馬號]
-                                        """
+• **不值博馬匹 (EV < 0，排除已選配腳)**: [列出其餘嚴重偏低/不值博之馬號]
+"""
                                     }]
                                 }
                                 headers = {
