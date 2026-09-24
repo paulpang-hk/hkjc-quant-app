@@ -1,9 +1,10 @@
+import base64
+import json
+import re
 import psycopg2
 import pandas as pd
 import requests
 import streamlit as st
-import json
-import base64
 
 st.set_page_config(page_title="HKJC Quant Cloud Engine", page_icon="🏇", layout="wide")
 st.title("🏇 HKJC Quant Strategy Engine (Cloud Edition)")
@@ -78,10 +79,11 @@ if neon_url:
                                     
                                     vision_payload = {
                                         "model": "google/gemini-2.5-flash",
+                                        "max_tokens": 300,  # Prevents high-token credit reservation errors
                                         "messages": [{
                                             "role": "user",
                                             "content": [
-                                                {"type": "text", "text": "Extract all horse numbers and their current WIN odds from this HKJC board screenshot. Output strictly a JSON object where keys are horse numbers as strings and values are float odds. Example: {\"1\": 3.5, \"2\": 12.0, \"3\": 8.5}. Output ONLY JSON."},
+                                                {"type": "text", "text": "Extract all horse numbers and their current WIN odds (獨贏) from this HKJC board screenshot. Output strictly a JSON object where keys are horse numbers as strings and values are float odds. Example: {\"1\": 3.5, \"2\": 12.0}. Output ONLY valid JSON."},
                                                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
                                             ]
                                         }]
