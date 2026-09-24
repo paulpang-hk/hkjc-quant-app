@@ -207,7 +207,7 @@ if neon_url:
                         h1, h2 = runners[i], runners[j]
                         p1, p2 = h1["Calibrated PWIN"], h2["Calibrated PWIN"]
                         
-                        # Harville Formula for Quinella Probability P(1st=A, 2nd=B) + P(1st=B, 2nd=A)
+                        # Harville Formula for Quinella Probability
                         if (1.0 - p1) > 0 and (1.0 - p2) > 0:
                             p_q = (p1 * (p2 / (1.0 - p1))) + (p2 * (p1 / (1.0 - p2)))
                         else:
@@ -281,7 +281,8 @@ Format strictly like this:
                                     "Authorization": f"Bearer {openrouter_key}",
                                     "Content-Type": "application/json"
                                 }
-                                res = requests.post("https://openrouter.ai/ai/v1/chat/completions", json=payload, headers=headers, timeout=15)
+                                # FIXED ENDPOINT URL: api/v1/chat/completions
+                                res = requests.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers=headers, timeout=15)
                                 if res.status_code == 200:
                                     analysis = res.json()["choices"][0]["message"]["content"]
                                     st.success("分析完成 (Analysis Complete)!")
