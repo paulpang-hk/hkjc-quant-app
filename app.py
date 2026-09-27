@@ -93,7 +93,7 @@ with st.expander(
       ["📸 Upload Odds Screenshots (AI OCR)", "✏️ Quick String Paste"]
   )
 
-  # --- TAB 1: BATCH MULTI-FILE SCREENSHOT OCR (OPENROUTER) ---
+  # --- TAB 1: BATCH MULTI-FILE SCREENSHOT OCR (OPENROUTER VISION) ---
   with tab_ocr:
     st.markdown(
         "Upload one or multiple screenshots of the HKJC or on.cc odds board."
@@ -104,7 +104,7 @@ with st.expander(
     uploaded_files = st.file_uploader(
         "Choose HKJC / on.cc Odds Screenshots (Select up to 11 files)...",
         type=["png", "jpg", "jpeg", "webp"],
-        accept_multiple_files=True,  # Enables multi-file selection
+        accept_multiple_files=True,
         key="batch_ocr_uploader",
     )
 
@@ -147,14 +147,14 @@ with st.expander(
                         }
                         """
 
-            # Call OpenRouter API
+            # OpenRouter API call with active endpoint ID: google/gemini-2.0-flash-001
             url = "https://openrouter.ai/api/v1/chat/completions"
             headers = {
                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                 "Content-Type": "application/json",
             }
             payload = {
-                "model": "google/gemini-flash-1.5",
+                "model": "google/gemini-2.0-flash-001",
                 "messages": [{
                     "role": "user",
                     "content": [
