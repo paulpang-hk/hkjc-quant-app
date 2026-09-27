@@ -149,7 +149,6 @@ with st.expander(
                 "Authorization": f"Bearer {OPENROUTER_API_KEY.strip()}",
                 "Content-Type": "application/json",
             }
-            # Active OpenRouter model endpoint with automatic fallback
             payload = {
                 "model": "openai/gpt-4o-mini",
                 "messages": [{
@@ -190,20 +189,28 @@ with st.expander(
                 db_conn = get_db_connection()
                 db_cur = db_conn.cursor()
 
+                updated_runners = 0
                 for horse_str, odds_val in odds_map.items():
-                  db_cur.execute(
-                      """
-                                        UPDATE model_pwin_results 
-                                        SET live_odds = %s 
-                                        WHERE race_date = %s AND race_no = %s AND horse_no = %s;
-                                    """,
-                      (
-                          float(odds_val),
-                          selected_date,
-                          int(parsed_race_no),
-                          int(horse_str),
-                      ),
-                  )
+                  # SAFE NUMERIC CONVERSION CHECK
+                  if odds_val is not None:
+                    try:
+                      clean_odds = float(odds_val)
+                      db_cur.execute(
+                          """
+                                                UPDATE model_pwin_results 
+                                                SET live_odds = %s 
+                                                WHERE race_date = %s AND race_no = %s AND horse_no = %s;
+                                            """,
+                          (
+                              clean_odds,
+                              selected_date,
+                              int(parsed_race_no),
+                              int(horse_str),
+                          ),
+                      )
+                      updated_runners += 1
+                    except (ValueError, TypeError):
+                      continue
 
                 db_conn.commit()
                 db_cur.close()
@@ -211,8 +218,8 @@ with st.expander(
 
                 success_count += 1
                 st.success(
-                    f"✅ Race {parsed_race_no}: Parsed {len(odds_map)} runners"
-                    f" from {uploaded_file.name}"
+                    f"✅ Race {parsed_race_no}: Parsed {updated_runners}"
+                    f" runners from {uploaded_file.name}"
                 )
               else:
                 st.warning(
@@ -258,7 +265,6 @@ with st.expander(
                 (float(o_val), selected_date, selected_race, int(h_no)),
             )
           db_conn.commit()
-          db_cur.close()
           db_cur.close()
           db_conn.close()
           st.success(f"✅ Updated {len(pairs)} runners for Race {selected_race}!")
