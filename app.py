@@ -33,14 +33,13 @@ def get_db_connection():
   return psycopg2.connect(NEON_DB_URL)
 
 
-# Helper function to compress uploaded images before base64 encoding
-def compress_image_bytes(image_bytes, max_dim=1200, quality=75):
+# Compress uploaded image in memory to reduce network payload
+def compress_image_bytes(image_bytes, max_dim=1000, quality=70):
   try:
     img = Image.open(io.BytesIO(image_bytes))
     if img.mode != "RGB":
       img = img.convert("RGB")
 
-    # Resize if image exceeds max dimension
     width, height = img.size
     if max(width, height) > max_dim:
       if width > height:
@@ -118,7 +117,7 @@ with st.expander(
       ["📸 Upload Odds Screenshots (AI OCR)", "✏️ Quick String Paste"]
   )
 
-  # --- TAB 1: BATCH OCR (COMPRESSED + PACED RETRY) ---
+  # --- TAB 1: BATCH OCR (FAILSAFE PACED BATCH) ---
   with tab_ocr:
     st.markdown(
         "Upload one or multiple screenshots of the HKJC or on.cc odds board."
@@ -149,12 +148,12 @@ with st.expander(
 
         for idx, uploaded_file in enumerate(uploaded_files):
           status_text.text(
-              f"Compressing & Processing screenshot {idx+1}/{total_files}:"
+              f"Processing image {idx+1}/{total_files}:"
               f" {uploaded_file.name}..."
           )
 
           try:
-            # 1. Compress image in memory to reduce payload size
+            # 1. Compress image in memory
             raw_bytes = uploaded_file.getvalue()
             compressed_bytes, mime_type = compress_image_bytes(raw_bytes)
             base64_image = base64.b64encode(compressed_bytes).decode("utf-8")
@@ -194,22 +193,27 @@ with st.expander(
                 }],
             }
 
+            # Retry loop with rate-limit mitigation
             res = None
             for attempt in range(3):
               try:
                 res = requests.post(
-                    url, headers=headers, json=payload, timeout=40
+                    url, headers=headers, json=payload, timeout=45
                 )
                 if res.status_code in [402, 429]:
                   status_text.text(
-                      f"⚠️ Rate limit hit. Pausing 5s before retrying"
+                      f"⏳ OpenRouter rate limit hit. Pausing 8s before retrying"
                       f" {uploaded_file.name} (Attempt {attempt+1}/3)..."
                   )
-                  time.sleep(5)
+                  time.sleep(8)
                 else:
                   break
               except requests.exceptions.RequestException:
-                time.sleep(3)
+                status_text.text(
+                    f"⏳ Timeout on attempt {attempt+1}/3. Retrying"
+                    f" {uploaded_file.name}..."
+                )
+                time.sleep(4)
 
             if res and res.status_code == 200:
               resp_json = res.json()
@@ -228,6 +232,7 @@ with st.expander(
               odds_map = parsed_data.get("odds", {})
 
               if parsed_race_no and odds_map:
+                # Immediate atomic DB commit
                 db_conn = get_db_connection()
                 db_cur = db_conn.cursor()
 
@@ -264,25 +269,27 @@ with st.expander(
                 )
               else:
                 st.warning(
-                    f"⚠️ Could not extract valid odds JSON from"
-                    f" {uploaded_file.name}"
+                    f"⚠️ Could not extract odds JSON from {uploaded_file.name}"
                 )
             else:
-              err_status = str(res.status_code) if res else "No Response"
-              err_body = res.text if res else "Timeout"
-              st.error(
-                  f"❌ OpenRouter API error ({err_status}): {err_body}"
+              err_code = str(res.status_code) if res else "Timeout"
+              st.warning(
+                  f"⚠️ Skipped {uploaded_file.name} due to OpenRouter API response"
+                  f" ({err_code}). Continuing batch..."
               )
 
           except Exception as ex:
-            st.error(f"❌ Error parsing {uploaded_file.name}: {ex}")
+            st.warning(
+                f"⚠️ Error processing {uploaded_file.name}: {ex}. Skipping to"
+                " next file."
+            )
 
-          time.sleep(3)
+          # 5-second pacing delay to let OpenRouter in-flight budget reset
+          time.sleep(5)
           progress_bar.progress((idx + 1) / total_files)
 
         status_text.text(
-            f"🎉 Batch processing complete! Successfully updated"
-            f" {success_count}/{total_files} race screenshots."
+            f"🎉 Batch processing complete! Updated {success_count}/{total_files} race screenshots."
         )
         time.sleep(1)
         st.rerun()
