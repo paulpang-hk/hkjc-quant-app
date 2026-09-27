@@ -108,7 +108,8 @@ with st.expander(
     if uploaded_files and st.button(
         "🚀 Process All Uploaded Screenshots (OCR)"
     ):
-      if not OPENROUTER_API_KEY:
+      clean_api_key = OPENROUTER_API_KEY.strip()
+      if not clean_api_key:
         st.error(
             "❌ OPENROUTER_API_KEY is missing in Streamlit Secrets! Please add"
             " it under App Settings."
@@ -145,7 +146,7 @@ with st.expander(
 
             url = "https://openrouter.ai/api/v1/chat/completions"
             headers = {
-                "Authorization": f"Bearer {OPENROUTER_API_KEY.strip()}",
+                "Authorization": f"Bearer {clean_api_key}",
                 "Content-Type": "application/json",
             }
             payload = {
@@ -166,7 +167,6 @@ with st.expander(
                 }],
             }
 
-            # Attempt request with automatic retry if rate-limited (402/429)
             res = None
             for attempt in range(3):
               res = requests.post(
@@ -238,15 +238,15 @@ with st.expander(
                     f" {uploaded_file.name}"
                 )
             else:
+              err_status = str(res.status_code) if res else "No Response"
+              err_body = res.text if res else "Timeout"
               st.error(
-                  f"❌ OpenRouter API error ({res.status_code if res else 'No'}"
-                  f" Response}): {res.text if res else ''}"
+                  f"❌ OpenRouter API error ({err_status}): {err_body}"
               )
 
           except Exception as ex:
             st.error(f"❌ Error parsing {uploaded_file.name}: {ex}")
 
-          # Add 2-second delay between files to respect OpenRouter rate limits
           time.sleep(2)
           progress_bar.progress((idx + 1) / total_files)
 
