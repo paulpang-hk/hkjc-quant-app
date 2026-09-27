@@ -1,302 +1,108 @@
-import base64
-import json
-import re
-import psycopg2
-import pandas as pd
-import requests
+import time
+import google.generativeai as genai
 import streamlit as st
 
-st.set_page_config(page_title="HKJC Quant Cloud Engine", page_icon="🏇", layout="wide")
-st.title("🏇 HKJC Quant Strategy Engine (Cloud Edition)")
+# Configure Gemini Vision API Key
+genai.configure(api_key=st.secrets.get("GEMINI_API_KEY", ""))
 
-default_neon = "postgresql://neondb_owner:npg_D2YzinaM8grT@ep-snowy-fire-b59poqzm-pooler.c-7.us-east-2.aws.neon.tech/neondb?sslmode=require"
+with st.expander(
+    "⚡ Fast Live Odds Manual / Screenshot Sync (Click to Open)", expanded=False
+):
+  st.markdown("### 📸 Batch Upload HKJC / on.cc Odds Screenshots")
 
-# Safe retrieval of OpenRouter secret
-default_or_key = ""
-try:
-    if "OPENROUTER_API_KEY" in st.secrets:
-        default_or_key = st.secrets["OPENROUTER_API_KEY"]
-except Exception:
-    pass
+  # Enable accept_multiple_files=True for multi-file batch drag-and-drop
+  uploaded_files = st.file_uploader(
+      "Choose HKJC / on.cc Odds Screenshots (Select up to 11 files)...",
+      type=["png", "jpg", "jpeg", "webp"],
+      accept_multiple_files=True,  # Allows batch upload
+  )
 
-st.sidebar.header("⚙️ Cloud Credentials")
-neon_url = st.sidebar.text_input("Neon Cloud DB Connection String", value=default_neon, type="password")
-openrouter_key = st.sidebar.text_input("OpenRouter API Key", value=default_or_key, type="password")
+  if uploaded_files and st.button("🚀 Process All Uploaded Screenshots (OCR)"):
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    progress_bar = st.progress(0)
+    status_text = st.empty()
 
-def update_odds_in_neon(conn_url, r_date, r_no, odds_dict):
-    """Batch updates live odds in Neon Cloud DB from a dictionary {horse_no: odds_val}"""
-    try:
-        cloud_conn = psycopg2.connect(conn_url)
-        cloud_cur = cloud_conn.cursor()
-        count = 0
-        for h_no, o_val in odds_dict.items():
-            cloud_cur.execute("""
-                UPDATE model_pwin_results 
-                SET live_odds = %s 
-                WHERE race_date = %s AND race_no = %s AND horse_no = %s;
-            """, (float(o_val), r_date, r_no, int(h_no)))
-            count += 1
-        cloud_conn.commit()
-        cloud_cur.close(); cloud_conn.close()
-        return count
-    except Exception as e:
-        st.error(f"Failed to update Neon Cloud DB: {e}")
-        return 0
+    total_files = len(uploaded_files)
+    success_count = 0
 
-if neon_url:
-    try:
-        conn = psycopg2.connect(neon_url)
-        dates_df = pd.read_sql("SELECT DISTINCT race_date FROM model_pwin_results ORDER BY race_date DESC;", conn)
-        available_dates = dates_df['race_date'].astype(str).tolist()
+    for idx, uploaded_file in enumerate(uploaded_files):
+      status_text.text(
+          f"Processing screenshot {idx+1}/{total_files}:"
+          f" {uploaded_file.name}..."
+      )
 
-        if not available_dates:
-            st.warning("⚠️ Connected to Neon Cloud DB, but no race records were found.")
-        else:
-            c1, c2 = st.columns([2, 1])
-            with c1:
-                selected_date = st.selectbox("📅 Select Race Meeting Date", available_dates)
-            with c2:
-                selected_race = st.selectbox("🏁 Select Race Number", list(range(1, 12)), index=0)
+      try:
+        # Load image bytes
+        image_bytes = uploaded_file.getvalue()
+        image_parts = [{"mime_type": uploaded_file.type, "data": image_bytes}]
 
-            # =========================================================================
-            # FAST ODDS INGESTION PANEL (SCREENSHOT OCR + QUICK PASTE)
-            # =========================================================================
-            with st.expander("⚡ **Fast Live Odds Manual / Screenshot Sync (Click to Open)**", expanded=False):
-                tab1, tab2 = st.tabs(["📸 Upload Odds Screenshot (AI OCR)", "✍️ Quick String Paste"])
+        # Prompt Gemini Vision to extract Race Number and Runner Odds
+        prompt = """
+                Analyze this HKJC / on.cc horse racing odds screenshot.
+                Extract the Race Number and WIN odds for each horse number.
+                Return ONLY a valid raw JSON object in this exact format without markdown formatting:
+                {
+                  "race_no": 1,
+                  "odds": {
+                    "1": 3.5,
+                    "2": 12.0,
+                    "3": 5.2
+                  }
+                }
+                """
 
-                # --- TAB 1: SCREENSHOT OCR ---
-                with tab1:
-                    st.write("Upload a screenshot of the HKJC live odds board. Gemini will read the odds and sync Neon Cloud DB automatically.")
-                    uploaded_img = st.file_uploader("Choose HKJC Odds Screenshot...", type=["png", "jpg", "jpeg", "webp"])
-                    if uploaded_img and st.button("🔍 Parse Screenshot & Sync to Cloud DB"):
-                        if not openrouter_key:
-                            st.error("Please enter your OpenRouter API Key in the sidebar.")
-                        else:
-                            with st.spinner("Gemini is reading screenshot and extracting live odds..."):
-                                try:
-                                    img_bytes = uploaded_img.read()
-                                    base64_img = base64.b64encode(img_bytes).decode('utf-8')
-                                    
-                                    vision_payload = {
-                                        "model": "google/gemini-2.5-flash",
-                                        "max_tokens": 300,
-                                        "messages": [{
-                                            "role": "user",
-                                            "content": [
-                                                {"type": "text", "text": "Extract all horse numbers and their current WIN odds (獨贏) from this HKJC board screenshot. Output strictly a JSON object where keys are horse numbers as strings and values are float odds. Example: {\"1\": 3.5, \"2\": 12.0}. Output ONLY valid JSON."},
-                                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
-                                            ]
-                                        }]
-                                    }
-                                    v_res = requests.post("https://openrouter.ai/api/v1/chat/completions", json=vision_payload, headers={"Authorization": f"Bearer {openrouter_key}", "Content-Type": "application/json"}, timeout=20)
-                                    if v_res.status_code == 200:
-                                        raw_json_str = v_res.json()["choices"][0]["message"]["content"].replace("```json", "").replace("```", "").strip()
-                                        parsed_dict = json.loads(raw_json_str)
-                                        updated_n = update_odds_in_neon(neon_url, selected_date, selected_race, parsed_dict)
-                                        st.success(f"✅ Successfully read screenshot and updated {updated_n} horses in Neon Cloud DB!")
-                                        st.rerun()
-                                    else:
-                                        st.error(f"Vision API Error: {v_res.text}")
-                                except Exception as ve:
-                                    st.error(f"Screenshot Processing Error: {ve}")
+        response = model.generate_content([prompt, image_parts[0]])
+        cleaned_json_str = (
+            response.text.replace("```json", "").replace("```", "").strip()
+        )
 
-                # --- TAB 2: QUICK PASTE STRING ---
-                with tab2:
-                    st.write("Format example: `1=3.5; 2=8.2; 3=14.0; 4=5.1` or `1:3.5, 2:8.2, 3:14.0`")
-                    paste_str = st.text_input("Paste Odds String:", placeholder="1=3.5; 2=8.2; 3=14.0; 4=5.1")
-                    if st.button("🚀 Push Pasted Odds to Cloud DB"):
-                        if paste_str:
-                            pairs = re.findall(r'(\d{1,2})\s*[:=,\s-]\s*([\d\.]+)', paste_str)
-                            if pairs:
-                                parsed_dict = {p[0]: float(p[1]) for p in pairs}
-                                updated_n = update_odds_in_neon(neon_url, selected_date, selected_race, parsed_dict)
-                                st.success(f"✅ Successfully updated {updated_n} horses in Neon Cloud DB!")
-                                st.rerun()
-                            else:
-                                st.error("Could not parse numbers from string. Use format like: `1=3.5; 2=8.2; 3=14.0`")
+        import json
 
-            # =========================================================================
-            # MAIN RACECARD QUERY
-            # =========================================================================
-            query = f"""
-                SELECT 
-                    horse_no AS "No.", horse_name AS "Horse Name", brand_code AS "Brand",
-                    jockey AS "Jockey", trainer AS "Trainer", draw AS "Draw",
-                    carried_weight AS "Wt", rating AS "Rtg", model_pwin AS "PWIN", 
-                    fair_odds AS "Fair Odds", live_odds AS "Live Odds"
-                FROM model_pwin_results
-                WHERE race_date = '{selected_date}' AND race_no = {selected_race}
-                ORDER BY model_pwin DESC;
-            """
-            df = pd.read_sql(query, conn)
+        parsed_data = json.loads(cleaned_json_str)
 
-            if not df.empty:
-                df["PWIN %"] = (df["PWIN"] * 100).round(2)
-                
-                raw_live_odds = df["Live Odds"]
-                is_dummy_odds = (raw_live_odds == 10.0).all() or (raw_live_odds == 0.0).all() or raw_live_odds.isna().all()
+        race_no = parsed_data.get("race_no")
+        odds_map = parsed_data.get("odds", {})
 
-                if is_dummy_odds:
-                    st.warning("⚠️ **Live Odds Not Synced!** Upload a screenshot above or enter manual odds below.")
+        if race_no and odds_map:
+          # Update Neon Database for extracted race
+          import psycopg2
 
-                df["Live Odds"] = df["Live Odds"].apply(lambda x: x if (pd.notna(x) and x > 1.0) else 10.0)
+          conn = psycopg2.connect(st.secrets["NEON_DB_URL"])
+          cur = conn.cursor()
 
-                st.markdown(f"### 📊 Racecard Matrix: {selected_date} | Race {selected_race}")
+          for horse_str, odds_val in odds_map.items():
+            cur.execute(
+                """
+                            UPDATE model_pwin_results
+                            SET live_odds = %s
+                            WHERE race_date = %s AND race_no = %s AND horse_no = %s;
+                        """,
+                (
+                    float(odds_val),
+                    selected_date,
+                    int(race_no),
+                    int(horse_str),
+                ),
+            )
 
-                edited_df = st.data_editor(
-                    df[["No.", "Horse Name", "Brand", "Jockey", "Trainer", "Draw", "Wt", "Rtg", "PWIN %", "Fair Odds", "Live Odds"]],
-                    column_config={
-                        "Live Odds": st.column_config.NumberColumn("Live Odds (Board)", min_value=1.1, max_value=200.0, step=0.1, format="%.1f"),
-                        "PWIN %": st.column_config.NumberColumn("Model PWIN %", format="%.2f%%")
-                    },
-                    disabled=["No.", "Horse Name", "Brand", "Jockey", "Trainer", "Draw", "Wt", "Rtg", "PWIN %", "Fair Odds"],
-                    hide_index=True, use_container_width=True
-                )
+          conn.commit()
+          cur.close()
+          conn.close()
 
-                # =========================================================================
-                # DYNAMIC MARKET PROBABILITY BLENDING & CALIBRATION ENGINE
-                # =========================================================================
-                edited_df["Raw PWIN"] = edited_df["PWIN %"] / 100.0
-                edited_df["Market Implied PWIN"] = 1.0 / edited_df["Live Odds"]
+          success_count += 1
+          st.success(
+              f"✅ Race {race_no}: Parsed {len(odds_map)} runners from"
+              f" {uploaded_file.name}"
+          )
 
-                def calc_calibrated_pwin(row):
-                    raw_pwin = row["Raw PWIN"]
-                    market_pwin = row["Market Implied PWIN"]
-                    odds = row["Live Odds"]
-                    
-                    # Favorites & Contenders (Odds <= 8.0): Give 60% weight to market signals ("smart money")
-                    if odds <= 8.0:
-                        w_market = 0.60
-                    # Mid-tier runners (8.0 < Odds <= 25.0): Balanced 50/50 blend
-                    elif odds <= 25.0:
-                        w_market = 0.50
-                    # Longshots (Odds > 25.0): Reduce market weight to 30% to prevent noisy odds spikes
-                    else:
-                        w_market = 0.30
-                        
-                    return (w_market * market_pwin) + ((1.0 - w_market) * raw_pwin)
+      except Exception as e:
+        st.error(f"❌ Failed to process {uploaded_file.name}: {e}")
 
-                edited_df["Calibrated PWIN"] = edited_df.apply(calc_calibrated_pwin, axis=1)
-                edited_df["Calibrated PWIN %"] = (edited_df["Calibrated PWIN"] * 100.0).round(2)
-                edited_df["Calibrated Fair Odds"] = (1.0 / edited_df["Calibrated PWIN"]).round(2)
+      # Update progress bar
+      progress_bar.progress((idx + 1) / total_files)
 
-                # Compute Calibrated Expected Value (EV)
-                edited_df["Expected Value (EV)"] = ((edited_df["Calibrated PWIN"] * edited_df["Live Odds"]) - 1.0).round(3)
-
-                # Guardrail: Cap extreme longshots (> 35.0 odds) from generating fake positive EV
-                edited_df.loc[edited_df["Live Odds"] > 35.0, "Expected Value (EV)"] = -0.999
-
-                st.markdown("### 🎯 Value Analysis & Overlays (Calibrated)")
-                def highlight_ev(val):
-                    if val > 0.15: return 'background-color: #d4edda; color: #155724; font-weight: bold'
-                    elif val > 0.0: return 'background-color: #e2e3e5; color: #383d41'
-                    else: return 'background-color: #f8d7da; color: #721c24'
-
-                styled_df = edited_df[["No.", "Horse Name", "Jockey", "Trainer", "Draw", "PWIN %", "Calibrated PWIN %", "Calibrated Fair Odds", "Live Odds", "Expected Value (EV)"]].style.map(highlight_ev, subset=["Expected Value (EV)"])
-                st.dataframe(styled_df, use_container_width=True, hide_index=True)
-
-                # =========================================================================
-                # HARVILLE QUINELLA (連贏) COMBINATION GENERATOR
-                # =========================================================================
-                st.markdown("#### 🎲 Top Model Quinella (連贏) Combinations")
-                quinella_pairs = []
-                runners = edited_df.to_dict('records')
-
-                for i in range(len(runners)):
-                    for j in range(i + 1, len(runners)):
-                        h1, h2 = runners[i], runners[j]
-                        p1, p2 = h1["Calibrated PWIN"], h2["Calibrated PWIN"]
-                        
-                        # Harville Formula for Quinella Probability P(1st=A, 2nd=B) + P(1st=B, 2nd=A)
-                        if (1.0 - p1) > 0 and (1.0 - p2) > 0:
-                            p_q = (p1 * (p2 / (1.0 - p1))) + (p2 * (p1 / (1.0 - p2)))
-                        else:
-                            p_q = 0.0
-                        
-                        quinella_pairs.append({
-                            "Pair": f"#{int(h1['No.'])} - #{int(h2['No.'])}",
-                            "Combo": f"{h1['Horse Name']} / {h2['Horse Name']}",
-                            "Est Q Prob %": round(p_q * 100, 2),
-                            "Combined Fair Odds": round(1.0 / p_q, 2) if p_q > 0 else 999.0
-                        })
-
-                q_df = pd.DataFrame(quinella_pairs).sort_values(by="Est Q Prob %", ascending=False).head(5)
-                st.dataframe(q_df, use_container_width=True, hide_index=True)
-
-                st.divider()
-                st.markdown("### 🤖 Gemini Executive Strategist Synthesis")
-
-                if st.button("🚀 Synthesize Investment Strategy (AI 策略分析)", type="primary"):
-                    current_odds = edited_df["Live Odds"]
-                    if (current_odds == 10.0).all() or (current_odds == 0.0).all():
-                        st.error("🛑 **Strategy Engine Halted: Live Odds Not Synced**")
-                        st.warning("Live odds are showing baseline defaults. Upload a screenshot above or enter manual odds first.")
-                        st.stop()
-
-                    if not openrouter_key:
-                        st.error("Please enter your OpenRouter API Key in the sidebar.")
-                    else:
-                        with st.spinner("正在計算最佳投注策略 (Calculating optimal stake strategy)..."):
-                            try:
-                                payload = {
-                                    "model": "google/gemini-2.5-flash",
-                                    "max_tokens": 750,
-                                    "messages": [{
-                                        "role": "user",
-                                        "content": f"""
-You are an elite HKJC Quant Portfolio Manager operating with strict risk management discipline.
-Analyze Race Matrix for Date: {selected_date}, Race: {selected_race}.
-Single Runner Data: {edited_df[['No.', 'Horse Name', 'Calibrated PWIN %', 'Calibrated Fair Odds', 'Live Odds', 'Expected Value (EV)']].to_json(orient='records')}
-Top Harville Quinella Combos: {q_df.to_json(orient='records')}
-
-STRICT QUANT STRATEGY RULES:
-1. WIN Bet Filter: ONLY recommend a WIN bet if single-runner Expected Value (EV) >= +0.10 and Calibrated PWIN % >= 8.5%.
-2. QUINELLA / PLACE Q BANKER RULE (連贏/位置Q 膽拖策略):
-   - Check the 'Top Harville Quinella Combos' table.
-   - If a specific horse appears as an anchor in 3 or more of the top 5 Quinella pairs (e.g., #2 appearing in 2-5, 2-8, 2-9, 2-7), you MUST nominate that horse as the Quinella Banker (連贏馬膽), even if its single WIN PWIN < 8.5%.
-   - Select the corresponding paired numbers as Legs (配腳).
-3. PASS RACE RULE: If NO horse meets single WIN EV criteria AND no single horse dominates the top Quinella combos, output "本場無值博馬匹，建議觀望 / 棄注 (PASS)".
-4. Language & Formatting: Output STRICTLY in Traditional Chinese (繁體中文) using Hong Kong racing terminology. Use DOUBLE NEWLINES between every section so Markdown renders properly.
-
-Format strictly like this:
-
-### 🎯 建議投資組合 (Top Investments)
-
-| 馬號 | 馬名 | 勝率 (PWIN %) | 公平賠率 | 即時賠率 | 期望值 (EV) | 建議注項 | 注碼分配 |
-|---|---|---|---|---|---|---|---|
-| [馬號] | [馬名] | [Calibrated PWIN %] | [Fair Odds] | [Live Odds] | [EV] | [WIN / Q / PQ / 觀望] | [注碼%] |
-
-### 🎲 連贏/位置Q 策略 (Quinella & Place Q)
-
-• **馬膽 (Banker)**: [馬號 & 馬名]
-
-• **配腳 (Legs)**: [馬號 & 馬名]
-
-• **建議組合**: [例如：2 號 膽 拖 5, 7, 8, 9 ( Q 及 PQ )]
-
-### ⚠️ 迴避馬匹 (Severe Underlays)
-
-• **不值博馬匹 (EV < 0，排除已選配腳)**: [列出其餘嚴重偏低/不值博之馬號]
-"""
-                                    }]
-                                }
-                                headers = {
-                                    "Authorization": f"Bearer {openrouter_key}",
-                                    "Content-Type": "application/json"
-                                }
-                                res = requests.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers=headers, timeout=15)
-                                if res.status_code == 200:
-                                    analysis = res.json()["choices"][0]["message"]["content"]
-                                    st.success("分析完成 (Analysis Complete)!")
-                                    st.markdown(analysis)
-                                else:
-                                    st.error(f"OpenRouter Error: {res.text}")
-                            except Exception as e:
-                                st.error(f"API Execution Error: {e}")
-            else:
-                st.warning(f"No runners found for Race {selected_race} on {selected_date}.")
-
-        conn.close()
-
-    except Exception as e:
-        st.error(f"Application Error: {e}")
+    status_text.text(
+        f"🎉 Batch processing complete! Successfully updated {success_count}/{total_files} race screenshots."
+    )
+    time.sleep(1)
+    st.rerun()
