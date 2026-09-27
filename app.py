@@ -91,7 +91,7 @@ with st.expander(
       ["📸 Upload Odds Screenshots (AI OCR)", "✏️ Quick String Paste"]
   )
 
-  # --- TAB 1: BATCH MULTI-FILE SCREENSHOT OCR (PACED WITH AUTO-RETRY) ---
+  # --- TAB 1: BATCH MULTI-FILE SCREENSHOT OCR (ROBUST RETRY & TIMEOUT) ---
   with tab_ocr:
     st.markdown(
         "Upload one or multiple screenshots of the HKJC or on.cc odds board."
@@ -169,17 +169,25 @@ with st.expander(
 
             res = None
             for attempt in range(3):
-              res = requests.post(
-                  url, headers=headers, json=payload, timeout=30
-              )
-              if res.status_code in [402, 429]:
-                status_text.text(
-                    f"⚠️ Rate limit hit. Pausing 5 seconds before retrying"
-                    f" {uploaded_file.name} (Attempt {attempt+1}/3)..."
+              try:
+                # Increased timeout to 60 seconds
+                res = requests.post(
+                    url, headers=headers, json=payload, timeout=60
                 )
-                time.sleep(5)
-              else:
-                break
+                if res.status_code in [402, 429]:
+                  status_text.text(
+                      f"⚠️ Rate limit hit. Pausing 6 seconds before retrying"
+                      f" {uploaded_file.name} (Attempt {attempt+1}/3)..."
+                  )
+                  time.sleep(6)
+                else:
+                  break
+              except requests.exceptions.Timeout:
+                status_text.text(
+                    f"⚠️ Response delay. Retrying {uploaded_file.name}"
+                    f" (Attempt {attempt+1}/3)..."
+                )
+                time.sleep(3)
 
             if res and res.status_code == 200:
               resp_json = res.json()
@@ -388,4 +396,4 @@ df_val_display.sort_values(
     by="Expected Value (EV)", ascending=False, inplace=True
 )
 
-st.dataframe(df_val_display, use_container_width=True, hide_index=True)
+st.dataframe(df_val_display, use_container_width=True, hide_index=True)s
