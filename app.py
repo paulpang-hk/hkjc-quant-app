@@ -24,7 +24,7 @@ NEON_DB_URL = st.secrets.get(
     "NEON_DB_URL",
     "postgresql://neondb_owner:npg_D2YzinaM8grT@ep-snowy-fire-b59poqzm-pooler.c-7.us-east-2.aws.neon.tech/neondb?sslmode=require",
 )
-GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "")
 
 
 def get_db_connection():
@@ -93,28 +93,28 @@ with st.expander(
       ["📸 Upload Odds Screenshots (AI OCR)", "✏️ Quick String Paste"]
   )
 
-  # --- TAB 1: BATCH MULTI-FILE SCREENSHOT OCR ---
+  # --- TAB 1: BATCH MULTI-FILE SCREENSHOT OCR (OPENROUTER) ---
   with tab_ocr:
     st.markdown(
         "Upload one or multiple screenshots of the HKJC or on.cc odds board."
-        " Gemini AI Vision will automatically read the race number and live"
-        " odds for all horses."
+        " AI Vision (via OpenRouter) will automatically extract the race number"
+        " and live odds."
     )
 
     uploaded_files = st.file_uploader(
         "Choose HKJC / on.cc Odds Screenshots (Select up to 11 files)...",
         type=["png", "jpg", "jpeg", "webp"],
-        accept_multiple_files=True,  # Enables batch multi-file upload
+        accept_multiple_files=True,  # Enables multi-file selection
         key="batch_ocr_uploader",
     )
 
     if uploaded_files and st.button(
         "🚀 Process All Uploaded Screenshots (OCR)"
     ):
-      if not GEMINI_API_KEY:
+      if not OPENROUTER_API_KEY:
         st.error(
-            "❌ GEMINI_API_KEY is missing in Streamlit Secrets! Please add it"
-            " under App Settings."
+            "❌ OPENROUTER_API_KEY is missing in Streamlit Secrets! Please add"
+            " it under App Settings."
         )
       else:
         progress_bar = st.progress(0)
@@ -129,6 +129,7 @@ with st.expander(
           )
 
           try:
+            # Base64 encode image for OpenRouter Vision API
             image_bytes = uploaded_file.getvalue()
             base64_image = base64.b64encode(image_bytes).decode("utf-8")
 
@@ -146,36 +147,40 @@ with st.expander(
                         }
                         """
 
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+            # Call OpenRouter API
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+            }
             payload = {
-                "contents": [{
-                    "parts": [
-                        {"text": prompt_text},
+                "model": "google/gemini-flash-1.5",
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt_text},
                         {
-                            "inline_data": {
-                                "mime_type": uploaded_file.type,
-                                "data": base64_image,
-                            }
+                            "type": "image_url",
+                            "image_url": {
+                                "url": (
+                                    f"data:{uploaded_file.type};base64,{base64_image}"
+                                )
+                            },
                         },
-                    ]
-                }]
+                    ],
+                }],
             }
 
-            res = requests.post(
-                url,
-                headers={"Content-Type": "application/json"},
-                json=payload,
-                timeout=30,
-            )
+            res = requests.post(url, headers=headers, json=payload, timeout=30)
 
             if res.status_code == 200:
               resp_json = res.json()
               raw_text = (
-                  resp_json.get("candidates", [{}])[0]
-                  .get("content", {})
-                  .get("parts", [{}])[0]
-                  .get("text", "")
+                  resp_json.get("choices", [{}])[0]
+                  .get("message", {})
+                  .get("content", "")
               )
+
               cleaned_json_str = (
                   raw_text.replace("```json", "").replace("```", "").strip()
               )
@@ -219,7 +224,7 @@ with st.expander(
                 )
             else:
               st.error(
-                  f"❌ Gemini Vision API error ({res.status_code}): {res.text}"
+                  f"❌ OpenRouter API error ({res.status_code}): {res.text}"
               )
 
           except Exception as ex:
@@ -301,7 +306,6 @@ else:
 # ==========================================
 st.subheader(f"📊 Racecard Matrix: {selected_date} | Race {selected_race}")
 
-# Display dataframe styling
 df_display = df.copy()
 df_display.rename(
     columns={
@@ -320,7 +324,6 @@ df_display.rename(
     inplace=True,
 )
 
-# Format numerical columns cleanly
 df_display["Model PWIN %"] = df_display["Model PWIN %"].apply(
     lambda x: f"{float(x)*100:.2f}%" if pd.notnull(x) else "None"
 )
@@ -342,7 +345,6 @@ df_val = df.copy()
 df_val["pwin_val"] = df_val["model_pwin"].fillna(0).astype(float)
 df_val["live_val"] = df_val["live_odds"].fillna(10.0).astype(float)
 
-# Calculate Expected Value (EV)
 df_val["EV"] = (df_val["pwin_val"] * df_val["live_val"]) - 1.0
 df_val["Overlay Flag"] = df_val["EV"].apply(
     lambda x: "🔥 VALUE OVERLAY"
@@ -364,7 +366,6 @@ df_val_display = pd.DataFrame({
     "Value Status": df_val["Overlay Flag"],
 })
 
-# Sort by Expected Value descending
 df_val_display.sort_values(
     by="Expected Value (EV)", ascending=False, inplace=True
 )
