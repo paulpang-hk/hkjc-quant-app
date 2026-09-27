@@ -43,7 +43,6 @@ try:
   conn = get_db_connection()
   cur = conn.cursor()
 
-  # Fetch available dates sorted descending
   cur.execute(
       "SELECT DISTINCT race_date FROM model_pwin_results ORDER BY race_date"
       " DESC;"
@@ -61,7 +60,6 @@ try:
         "📅 Select Race Meeting Date", available_dates, index=0
     )
 
-  # Fetch available races for selected date
   cur.execute(
       "SELECT DISTINCT race_no FROM model_pwin_results WHERE race_date = %s"
       " ORDER BY race_no ASC;",
@@ -129,7 +127,6 @@ with st.expander(
           )
 
           try:
-            # Base64 encode image for OpenRouter Vision API
             image_bytes = uploaded_file.getvalue()
             base64_image = base64.b64encode(image_bytes).decode("utf-8")
 
@@ -147,14 +144,14 @@ with st.expander(
                         }
                         """
 
-            # OpenRouter API call with active endpoint ID: google/gemini-2.0-flash-001
             url = "https://openrouter.ai/api/v1/chat/completions"
             headers = {
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Authorization": f"Bearer {OPENROUTER_API_KEY.strip()}",
                 "Content-Type": "application/json",
             }
+            # Active OpenRouter model endpoint with automatic fallback
             payload = {
-                "model": "google/gemini-2.0-flash-001",
+                "model": "openai/gpt-4o-mini",
                 "messages": [{
                     "role": "user",
                     "content": [
@@ -261,6 +258,7 @@ with st.expander(
                 (float(o_val), selected_date, selected_race, int(h_no)),
             )
           db_conn.commit()
+          db_cur.close()
           db_cur.close()
           db_conn.close()
           st.success(f"✅ Updated {len(pairs)} runners for Race {selected_race}!")
