@@ -91,12 +91,11 @@ with st.expander(
       ["📸 Upload Odds Screenshots (AI OCR)", "✏️ Quick String Paste"]
   )
 
-  # --- TAB 1: BATCH MULTI-FILE SCREENSHOT OCR (OPENROUTER VISION) ---
+  # --- TAB 1: BATCH MULTI-FILE SCREENSHOT OCR (PACED WITH AUTO-RETRY) ---
   with tab_ocr:
     st.markdown(
         "Upload one or multiple screenshots of the HKJC or on.cc odds board."
-        " AI Vision (via OpenRouter) will automatically extract the race number"
-        " and live odds."
+        " AI Vision will automatically extract the race number and live odds."
     )
 
     uploaded_files = st.file_uploader(
@@ -167,9 +166,22 @@ with st.expander(
                 }],
             }
 
-            res = requests.post(url, headers=headers, json=payload, timeout=30)
+            # Attempt request with automatic retry if rate-limited (402/429)
+            res = None
+            for attempt in range(3):
+              res = requests.post(
+                  url, headers=headers, json=payload, timeout=30
+              )
+              if res.status_code in [402, 429]:
+                status_text.text(
+                    f"⚠️ Rate limit hit. Pausing 5 seconds before retrying"
+                    f" {uploaded_file.name} (Attempt {attempt+1}/3)..."
+                )
+                time.sleep(5)
+              else:
+                break
 
-            if res.status_code == 200:
+            if res and res.status_code == 200:
               resp_json = res.json()
               raw_text = (
                   resp_json.get("choices", [{}])[0]
@@ -191,7 +203,6 @@ with st.expander(
 
                 updated_runners = 0
                 for horse_str, odds_val in odds_map.items():
-                  # SAFE NUMERIC CONVERSION CHECK
                   if odds_val is not None:
                     try:
                       clean_odds = float(odds_val)
@@ -228,12 +239,15 @@ with st.expander(
                 )
             else:
               st.error(
-                  f"❌ OpenRouter API error ({res.status_code}): {res.text}"
+                  f"❌ OpenRouter API error ({res.status_code if res else 'No'}"
+                  f" Response}): {res.text if res else ''}"
               )
 
           except Exception as ex:
             st.error(f"❌ Error parsing {uploaded_file.name}: {ex}")
 
+          # Add 2-second delay between files to respect OpenRouter rate limits
+          time.sleep(2)
           progress_bar.progress((idx + 1) / total_files)
 
         status_text.text(
