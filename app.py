@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 import base64
+import io
 import json
 import time
 import pandas as pd
+from PIL import Image
 import psycopg2
 import requests
 import streamlit as st
@@ -29,6 +31,31 @@ OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "")
 
 def get_db_connection():
   return psycopg2.connect(NEON_DB_URL)
+
+
+# Helper function to compress uploaded images before base64 encoding
+def compress_image_bytes(image_bytes, max_dim=1200, quality=75):
+  try:
+    img = Image.open(io.BytesIO(image_bytes))
+    if img.mode != "RGB":
+      img = img.convert("RGB")
+
+    # Resize if image exceeds max dimension
+    width, height = img.size
+    if max(width, height) > max_dim:
+      if width > height:
+        new_w = max_dim
+        new_h = int(height * (max_dim / width))
+      else:
+        new_h = max_dim
+        new_w = int(width * (max_dim / height))
+      img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+    output = io.BytesIO()
+    img.save(output, format="JPEG", quality=quality)
+    return output.getvalue(), "image/jpeg"
+  except Exception:
+    return image_bytes, "image/jpeg"
 
 
 # ==========================================
@@ -91,7 +118,7 @@ with st.expander(
       ["📸 Upload Odds Screenshots (AI OCR)", "✏️ Quick String Paste"]
   )
 
-  # --- TAB 1: BATCH MULTI-FILE SCREENSHOT OCR (ROBUST RETRY & TIMEOUT) ---
+  # --- TAB 1: BATCH OCR (COMPRESSED + PACED RETRY) ---
   with tab_ocr:
     st.markdown(
         "Upload one or multiple screenshots of the HKJC or on.cc odds board."
@@ -122,13 +149,15 @@ with st.expander(
 
         for idx, uploaded_file in enumerate(uploaded_files):
           status_text.text(
-              f"Processing screenshot {idx+1}/{total_files}:"
+              f"Compressing & Processing screenshot {idx+1}/{total_files}:"
               f" {uploaded_file.name}..."
           )
 
           try:
-            image_bytes = uploaded_file.getvalue()
-            base64_image = base64.b64encode(image_bytes).decode("utf-8")
+            # 1. Compress image in memory to reduce payload size
+            raw_bytes = uploaded_file.getvalue()
+            compressed_bytes, mime_type = compress_image_bytes(raw_bytes)
+            base64_image = base64.b64encode(compressed_bytes).decode("utf-8")
 
             prompt_text = """
                         Analyze this HKJC / on.cc horse racing odds screenshot.
@@ -158,9 +187,7 @@ with st.expander(
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": (
-                                    f"data:{uploaded_file.type};base64,{base64_image}"
-                                )
+                                "url": f"data:{mime_type};base64,{base64_image}"
                             },
                         },
                     ],
@@ -171,21 +198,17 @@ with st.expander(
             for attempt in range(3):
               try:
                 res = requests.post(
-                    url, headers=headers, json=payload, timeout=60
+                    url, headers=headers, json=payload, timeout=40
                 )
                 if res.status_code in [402, 429]:
                   status_text.text(
-                      f"⚠️ Rate limit hit. Pausing 6 seconds before retrying"
+                      f"⚠️ Rate limit hit. Pausing 5s before retrying"
                       f" {uploaded_file.name} (Attempt {attempt+1}/3)..."
                   )
-                  time.sleep(6)
+                  time.sleep(5)
                 else:
                   break
-              except requests.exceptions.Timeout:
-                status_text.text(
-                    f"⚠️ Response delay. Retrying {uploaded_file.name}"
-                    f" (Attempt {attempt+1}/3)..."
-                )
+              except requests.exceptions.RequestException:
                 time.sleep(3)
 
             if res and res.status_code == 200:
@@ -254,7 +277,7 @@ with st.expander(
           except Exception as ex:
             st.error(f"❌ Error parsing {uploaded_file.name}: {ex}")
 
-          time.sleep(2)
+          time.sleep(3)
           progress_bar.progress((idx + 1) / total_files)
 
         status_text.text(
