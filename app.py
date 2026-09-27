@@ -170,7 +170,6 @@ with st.expander(
             res = None
             for attempt in range(3):
               try:
-                # Increased timeout to 60 seconds
                 res = requests.post(
                     url, headers=headers, json=payload, timeout=60
                 )
@@ -396,4 +395,4 @@ df_val_display.sort_values(
     by="Expected Value (EV)", ascending=False, inplace=True
 )
 
-st.dataframe(df_val_display, use_container_width=True, hide_index=True)s
+st.dataframe(df_val_display, use_container_width=True, hide_index=True)
