@@ -118,7 +118,7 @@ with st.expander(
       ["📸 Upload Odds Screenshots (AI OCR)", "✏️ Quick String Paste"]
   )
 
-  # --- TAB 1: BATCH OCR (FAILSAFE PACED BATCH) ---
+  # --- TAB 1: BATCH OCR ---
   with tab_ocr:
     st.markdown(
         "Upload one or multiple screenshots of the HKJC or on.cc odds board."
@@ -154,7 +154,6 @@ with st.expander(
           )
 
           try:
-            # Compress image in memory
             raw_bytes = uploaded_file.getvalue()
             compressed_bytes, mime_type = compress_image_bytes(raw_bytes)
             base64_image = base64.b64encode(compressed_bytes).decode("utf-8")
@@ -210,7 +209,8 @@ with st.expander(
                   break
               except requests.exceptions.RequestException:
                 status_text.text(
-                    f"⏳ Timeout. Retrying {uploaded_file.name} (Attempt {attempt+1}/3)..."
+                    f"⏳ Timeout. Retrying {uploaded_file.name} (Attempt"
+                    f" {attempt+1}/3)..."
                 )
                 time.sleep(4)
 
@@ -278,7 +278,8 @@ with st.expander(
 
           except Exception as ex:
             st.warning(
-                f"⚠️ Error processing {uploaded_file.name}: {ex}. Skipping to next file."
+                f"⚠️ Error processing {uploaded_file.name}: {ex}. Skipping to"
+                " next file."
             )
 
           time.sleep(5)
@@ -290,18 +291,18 @@ with st.expander(
         time.sleep(1)
         st.rerun()
 
-  # --- TAB 2: MANUAL STRING PASTE (FIXED ST.FORM) ---
+  # --- TAB 2: MANUAL STRING PASTE (FORM WRAPPED) ---
   with tab_manual:
     st.markdown("Paste odds string in format: `1=3.5 2=12.0 3=5.2` or line-by-line")
-    
-    # Wrapped in st.form to force Streamlit to wait for button click
+
     with st.form("manual_odds_form"):
       manual_input = st.text_area("Live Odds String", height=100)
-      submit_manual = st.form_submit_button("💾 Apply Manual Odds to Current Race")
-      
+      submit_manual = st.form_submit_button(
+          "💾 Apply Manual Odds to Current Race"
+      )
+
       if submit_manual:
         if manual_input.strip():
-          # Regex allows spaces (e.g. "1 = 5.8")
           pairs = re.findall(r"(\d+)\s*=\s*([0-9\.]+)", manual_input)
           if pairs:
             try:
@@ -319,11 +320,14 @@ with st.expander(
               db_conn.commit()
               db_cur.close()
               db_conn.close()
-              
-              st.success(f"✅ Successfully updated {len(pairs)} runners for Race {selected_race}!")
-              time.sleep(1.5)  # Wait so you can read the success message
+
+              st.success(
+                  f"✅ Successfully updated {len(pairs)} runners for Race"
+                  f" {selected_race}!"
+              )
+              time.sleep(1)
               st.rerun()
-              
+
             except Exception as e:
               st.error(f"❌ Database error: {e}")
           else:
@@ -350,7 +354,7 @@ if df.empty:
   st.stop()
 
 # ==========================================
-# STATUS BANNER
+# STATUS BANNER & DATA PREPARATION
 # ==========================================
 has_live_odds = (
     df["live_odds"].notnull().any()
@@ -360,16 +364,181 @@ has_live_odds = (
 
 if not has_live_odds:
   st.warning(
-      "⚠️ Live Odds Not Synced! Displaying default baseline odds (10.0). Upload"
-      " screenshots above or run local poll_and_sync poller."
+      "⚠️ Live Odds Not Synced! Displaying baseline odds (10.0). Sync screenshots"
+      " above or paste manually."
   )
 else:
   st.success("🟢 Live Odds Synced & Active!")
 
+# Calculate Quant Analytics Columns
+df["pwin_val"] = df["model_pwin"].fillna(0).astype(float)
+df["live_val"] = df["live_odds"].fillna(10.0).astype(float)
+
+# Market Implied Probability (1 / Live Odds)
+df["market_prob"] = df["live_val"].apply(
+    lambda x: (1.0 / x) if x > 0 else 0.0
+)
+
+# Expected Value (EV) = (pwin * live_odds) - 1.0
+df["EV"] = (df["pwin_val"] * df["live_val"]) - 1.0
+
+# Edge / Probability Spread (Model PWIN % - Market Implied %)
+df["prob_edge"] = df["pwin_val"] - df["market_prob"]
+
+df["Overlay Flag"] = df["EV"].apply(
+    lambda x: "🔥 VALUE OVERLAY"
+    if x > 0.15
+    else ("✅ MILD VALUE" if x > 0.0 else "❌ UNDERLAY")
+)
+
 # ==========================================
-# TABLE 1: RACECARD MATRIX
+# SECTION 1: EXECUTIVE QUANT METRICS
 # ==========================================
-st.subheader(f"📊 Racecard Matrix: {selected_date} | Race {selected_race}")
+st.markdown("---")
+st.subheader("⚡ Quant Intelligence Overview")
+
+# 1. Top Model Pick
+top_pwin_row = df.loc[df["pwin_val"].idxmax()]
+# 2. Top Value Overlay
+top_ev_row = df.loc[df["EV"].idxmax()]
+# 3. Market Overround (Sum of Implied Probabilities)
+total_overround = df["market_prob"].sum() * 100
+# 4. Value Opportunities Count
+value_count = len(df[df["EV"] > 0.0])
+
+m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+
+with m_col1:
+  st.metric(
+      label="🥇 Top Model Pick",
+      value=f"#{top_pwin_row['horse_no']} {top_pwin_row['horse_name']}",
+      delta=f"{top_pwin_row['pwin_val']*100:.1f}% PWIN",
+  )
+
+with m_col2:
+  ev_delta_str = f"EV {top_ev_row['EV']:+.2f}"
+  st.metric(
+      label="🔥 Top Value Overlay",
+      value=f"#{top_ev_row['horse_no']} {top_ev_row['horse_name']}",
+      delta=ev_delta_str,
+      delta_color="normal" if top_ev_row["EV"] > 0 else "inverse",
+  )
+
+with m_col3:
+  st.metric(
+      label="📈 Market Overround Margin",
+      value=f"{total_overround:.1f}%",
+      delta=f"{total_overround - 100:+.1f}% House Take",
+      delta_color="inverse",
+  )
+
+with m_col4:
+  st.metric(
+      label="🎯 Positive EV Overlays",
+      value=f"{value_count} Runners",
+      delta=f"Out of {len(df)} Field Size",
+  )
+
+# ==========================================
+# SECTION 2: INTERACTIVE VISUAL ANALYTICS
+# ==========================================
+st.markdown("---")
+st.subheader("📊 Model vs. Market Mispricing Analysis")
+
+chart_col1, chart_col2 = st.columns(2)
+
+with chart_col1:
+  st.markdown("**Probability Comparison (Model PWIN % vs. Market Implied %)**")
+
+  # Prepare bar chart dataset
+  chart_df = pd.DataFrame({
+      "Horse": df.apply(
+          lambda r: f"#{r['horse_no']} {r['horse_name']}", axis=1
+      ),
+      "Model PWIN %": df["pwin_val"] * 100,
+      "Market Implied %": df["market_prob"] * 100,
+  }).set_index("Horse")
+
+  st.bar_chart(chart_df, height=320)
+
+with chart_col2:
+  st.markdown("**Expected Value (EV) Profile by Runner**")
+
+  ev_chart_df = pd.DataFrame({
+      "Horse": df.apply(
+          lambda r: f"#{r['horse_no']} {r['horse_name']}", axis=1
+      ),
+      "Expected Value (EV)": df["EV"],
+  }).set_index("Horse")
+
+  st.bar_chart(ev_chart_df, height=320)
+
+# ==========================================
+# SECTION 3: KELLY STAKING & BET SIZING
+# ==========================================
+st.markdown("---")
+st.subheader("💰 Recommended Kelly Bet Sizing")
+
+k_col1, k_col2 = st.columns([1, 2])
+
+with k_col1:
+  bankroll = st.number_input(
+      "Session Bankroll ($ HKD)",
+      min_value=100,
+      value=10000,
+      step=500,
+      key="kelly_bankroll",
+  )
+  kelly_fraction = st.slider(
+      "Kelly Fraction (Risk Model)",
+      min_value=0.10,
+      max_value=1.00,
+      value=0.25,
+      step=0.05,
+      help="0.25 = Quarter Kelly (Recommended for sports betting variance)",
+  )
+
+with k_col2:
+  # Full Kelly formula: f* = (p * b - q) / b where b = odds - 1
+  def calc_kelly_stake(row):
+    p = row["pwin_val"]
+    b = row["live_val"] - 1.0
+    if b <= 0 or p <= 0:
+      return 0.0
+    q = 1.0 - p
+    f_star = (p * b - q) / b
+    if f_star <= 0:
+      return 0.0
+    adjusted_stake = f_star * kelly_fraction * bankroll
+    return round(adjusted_stake, 0)
+
+  df["kelly_stake"] = df.apply(calc_kelly_stake, axis=1)
+
+  overlay_df = df[df["EV"] > 0.0].copy()
+
+  if overlay_df.empty:
+    st.info(
+        "ℹ️ No positive EV overlays detected for this race. Kelly Model"
+        " recommends NO BET."
+    )
+  else:
+    stake_summary = pd.DataFrame({
+        "No.": overlay_df["horse_no"],
+        "Horse Name": overlay_df["horse_name"],
+        "Model PWIN %": overlay_df["pwin_val"].apply(lambda x: f"{x*100:.2f}%"),
+        "Live Odds": overlay_df["live_val"].apply(lambda x: f"{x:.1f}"),
+        "Expected Value": overlay_df["EV"].apply(lambda x: f"{x:+.2f}"),
+        "Recommended Stake ($ HKD)": overlay_df["kelly_stake"].apply(
+            lambda x: f"${x:,.0f}"
+        ),
+    })
+    st.dataframe(stake_summary, use_container_width=True, hide_index=True)
+
+# ==========================================
+# SECTION 4: DETAILED RACECARD MATRIX
+# ==========================================
+st.markdown("---")
+st.subheader(f"📋 Full Racecard Matrix: {selected_date} | Race {selected_race}")
 
 df_display = df.copy()
 df_display.rename(
@@ -385,6 +554,7 @@ df_display.rename(
         "model_pwin": "Model PWIN %",
         "fair_odds": "Fair Odds",
         "live_odds": "Live Odds (Board)",
+        "Overlay Flag": "Value Status",
     },
     inplace=True,
 )
@@ -398,41 +568,22 @@ df_display["Fair Odds"] = df_display["Fair Odds"].apply(
 df_display["Live Odds (Board)"] = df_display["Live Odds (Board)"].apply(
     lambda x: f"{float(x):.1f}" if pd.notnull(x) else "10.0"
 )
+df_display["Expected Value (EV)"] = df["EV"].apply(lambda x: f"{x:+.2f}")
 
-st.dataframe(df_display, use_container_width=True, hide_index=True)
+matrix_cols = [
+    "No.",
+    "Horse Name",
+    "Brand",
+    "Jockey",
+    "Trainer",
+    "Draw",
+    "Wt",
+    "Rtg",
+    "Model PWIN %",
+    "Fair Odds",
+    "Live Odds (Board)",
+    "Expected Value (EV)",
+    "Value Status",
+]
 
-# ==========================================
-# TABLE 2: VALUE ANALYSIS & OVERLAYS
-# ==========================================
-st.subheader("🎯 Value Analysis & Overlays (Calibrated)")
-
-df_val = df.copy()
-df_val["pwin_val"] = df_val["model_pwin"].fillna(0).astype(float)
-df_val["live_val"] = df_val["live_odds"].fillna(10.0).astype(float)
-
-df_val["EV"] = (df_val["pwin_val"] * df_val["live_val"]) - 1.0
-df_val["Overlay Flag"] = df_val["EV"].apply(
-    lambda x: "🔥 VALUE OVERLAY"
-    if x > 0.15
-    else ("✅ MILD VALUE" if x > 0.0 else "❌ UNDERLAY")
-)
-
-df_val_display = pd.DataFrame({
-    "No.": df_val["horse_no"],
-    "Horse Name": df_val["horse_name"],
-    "Jockey": df_val["jockey"],
-    "Trainer": df_val["trainer"],
-    "PWIN %": df_val["pwin_val"].apply(lambda x: f"{x*100:.2f}%"),
-    "Fair Odds": df_val["fair_odds"].apply(
-        lambda x: f"{float(x):.2f}" if pd.notnull(x) else "None"
-    ),
-    "Live Odds": df_val["live_val"].apply(lambda x: f"{x:.1f}"),
-    "Expected Value (EV)": df_val["EV"].apply(lambda x: f"{x:+.2f}"),
-    "Value Status": df_val["Overlay Flag"],
-})
-
-df_val_display.sort_values(
-    by="Expected Value (EV)", ascending=False, inplace=True
-)
-
-st.dataframe(df_val_display, use_container_width=True, hide_index=True)
+st.dataframe(df_display[matrix_cols], use_container_width=True, hide_index=True)
