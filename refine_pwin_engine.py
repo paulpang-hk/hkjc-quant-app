@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
+import itertools
 import numpy as np
 import pandas as pd
 import psycopg2
@@ -19,12 +20,98 @@ def get_db_connection():
 
 
 # ==========================================
+# HEAD-TO-HEAD (H2H) MATRIX CALCULATOR
+# ==========================================
+def calculate_h2h_multipliers(df_race, conn, min_encounters=2, penalty_factor=0.15):
+  """
+  Queries historical race results to detect pairwise dominance between runners
+  in the current race field. Returns a dict of {horse_no: h2h_multiplier}.
+  """
+  horse_names = df_race["horse_name"].dropna().unique().tolist()
+  multipliers = {int(h_no): 1.0 for h_no in df_race["horse_no"]}
+
+  if len(horse_names) < 2:
+    return multipliers
+
+  try:
+    # Query past finished races where at least two of the current runners competed
+    query = """
+            SELECT race_date, race_no, horse_name, finish_position
+            FROM model_pwin_results
+            WHERE horse_name = ANY(%s) 
+              AND finish_position IS NOT NULL 
+              AND finish_position > 0
+            ORDER BY race_date DESC, race_no ASC;
+        """
+    df_history = pd.read_sql(query, conn, params=(horse_names,))
+
+    if df_history.empty:
+      return multipliers
+
+    # Group by past race event to analyze head-to-head outcomes
+    grouped = df_history.groupby(["race_date", "race_no"])
+
+    # Dictionary to track pairwise wins: h2h_stats[(Horse_A, Horse_B)] = {'meets': X, 'a_losses': Y}
+    h2h_stats = {}
+
+    for _, group in grouped:
+      if len(group) < 2:
+        continue  # Need at least two horses in the same historical race
+      
+      runners_in_race = group[["horse_name", "finish_position"]].to_dict("records")
+      
+      for r1, r2 in itertools.combinations(runners_in_race, 2):
+        name_a, pos_a = r1["horse_name"], r1["finish_position"]
+        name_b, pos_b = r2["horse_name"], r2["finish_position"]
+
+        if pos_a == pos_b:
+          continue
+
+        # Sort names to maintain consistent dict key order
+        pair_key = (name_a, name_b) if name_a < name_b else (name_b, name_a)
+        if pair_key not in h2h_stats:
+          h2h_stats[pair_key] = {name_a: 0, name_b: 0, "total": 0}
+
+        h2h_stats[pair_key]["total"] += 1
+        if pos_a < pos_b:
+          h2h_stats[pair_key][name_a] += 1  # Name A beat Name B
+        else:
+          h2h_stats[pair_key][name_b] += 1  # Name B beat Name A
+
+    # Calculate penalties based on historical dominance
+    name_to_no = df_race.set_index("horse_name")["horse_no"].to_dict()
+
+    for (name_a, name_b), stats in h2h_stats.items():
+      total_meets = stats["total"]
+      if total_meets >= min_encounters:
+        wins_a = stats[name_a]
+        wins_b = stats[name_b]
+
+        # Check if Name B completely dominates Name A (100% loss rate for A)
+        if wins_a == 0 and wins_b == total_meets:
+          h_no_a = name_to_no.get(name_a)
+          if h_no_a in multipliers:
+            multipliers[h_no_a] *= (1.0 - penalty_factor)
+
+        # Check if Name A completely dominates Name B (100% loss rate for B)
+        elif wins_b == 0 and wins_a == total_meets:
+          h_no_b = name_to_no.get(name_b)
+          if h_no_b in multipliers:
+            multipliers[h_no_b] *= (1.0 - penalty_factor)
+
+  except Exception as e:
+    print(f"⚠️ H2H Matrix calculation skipped due to notice: {e}")
+
+  return multipliers
+
+
+# ==========================================
 # REFINEMENT ENGINE CORE LOGIC
 # ==========================================
-def calculate_refined_pwin(df_race, alpha=0.65):
-  """Applies Bayesian place penalties, health dampening, and market shrinkage
-
-  to recalculate clean PWIN and Fair Odds across a race field.
+def calculate_refined_pwin(df_race, conn, alpha=0.65):
+  """
+  Applies Bayesian place penalties, health dampening, H2H matrix dampening,
+  and market shrinkage to recalculate clean PWIN and Fair Odds.
   """
   df = df_race.copy()
 
@@ -68,12 +155,19 @@ def calculate_refined_pwin(df_race, alpha=0.65):
 
   df["health_multiplier"] = df["health_notes"].apply(get_health_penalty)
 
-  # 3. Apply Penalties to Raw PWIN
+  # 3. Calculate Direct Head-to-Head (H2H) Multipliers
+  h2h_map = calculate_h2h_multipliers(df, conn, min_encounters=2, penalty_factor=0.15)
+  df["h2h_multiplier"] = df["horse_no"].map(h2h_map).fillna(1.0)
+
+  # 4. Apply All Compound Penalties to Raw PWIN
   df["pwin_adjusted"] = (
-      df["model_pwin"] * df["place_multiplier"] * df["health_multiplier"]
+      df["model_pwin"] 
+      * df["place_multiplier"] 
+      * df["health_multiplier"]
+      * df["h2h_multiplier"]
   )
 
-  # 4. Market Probability Blending (Shrinkage)
+  # 5. Market Probability Blending (Shrinkage)
   df["market_prob"] = df["live_odds"].apply(
       lambda odds: (1.0 / odds) if odds > 0 else 0.05
   )
@@ -81,14 +175,14 @@ def calculate_refined_pwin(df_race, alpha=0.65):
       (1.0 - alpha) * df["market_prob"]
   )
 
-  # 5. Field Re-normalization (Sum = 1.0)
+  # 6. Field Re-normalization (Sum = 1.0)
   field_sum = df["pwin_blended"].sum()
   if field_sum > 0:
     df["model_pwin_refined"] = df["pwin_blended"] / field_sum
   else:
     df["model_pwin_refined"] = 1.0 / len(df)
 
-  # 6. Recalculate Fair Odds
+  # 7. Recalculate Fair Odds
   df["fair_odds_refined"] = df["model_pwin_refined"].apply(
       lambda p: round(1.0 / p, 2) if p > 0 else 999.0
   )
@@ -119,7 +213,6 @@ def run_pipeline():
   updated_records = 0
 
   for race_date, race_no in races:
-    # Use SELECT * to prevent SQL UndefinedColumn errors
     query = """
             SELECT *
             FROM model_pwin_results
@@ -130,8 +223,8 @@ def run_pipeline():
     if df_race.empty:
       continue
 
-    # Execute mathematical refinement
-    df_refined = calculate_refined_pwin(df_race, alpha=0.65)
+    # Execute mathematical refinement including H2H Matrix
+    df_refined = calculate_refined_pwin(df_race, conn, alpha=0.65)
 
     # Prepare batch update data
     update_data = []
@@ -158,8 +251,7 @@ def run_pipeline():
   cur.close()
   conn.close()
   print(
-      f"✅ Successfully recalculated and updated {updated_records} runners in"
-      " Neon PostgreSQL!"
+      f"✅ Successfully recalculated and updated {updated_records} runners with H2H Matrix in Neon PostgreSQL!"
   )
 
 
