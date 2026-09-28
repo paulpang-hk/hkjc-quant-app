@@ -410,20 +410,11 @@ else:
   st.success("🟢 Live Odds Synced & Active!")
 
 # ==========================================
-# UPGRADE 1 & 4: PRIME OVERLAY FILTER + KELLY CAP
+# UPGRADE 4: CALCULATE KELLY STAKE FIRST
 # ==========================================
-# Filter strict Prime Overlay Zone: PWIN >= 8.0%, Live Odds <= 35.0, +0.15 <= EV <= +2.50
-prime_overlays = df[
-    (df["pwin_val"] >= 0.08)
-    & (df["live_val"] <= 35.0)
-    & (df["EV"] >= 0.15)
-    & (df["EV"] <= 2.50)
-].sort_values(by="EV", ascending=False)
-
 bankroll_default = 10000.0
 kelly_frac = 0.25
-max_stake_cap = 500.0  # Upgrade 4: 5% Max Exposure Cap ($500 per horse)
-
+max_stake_cap = 500.0  # 5% Max Exposure Cap ($500 per horse)
 
 def calc_kelly_capped(row):
   p = row["pwin_val"]
@@ -436,10 +427,10 @@ def calc_kelly_capped(row):
   raw_stake = round(f_star * kelly_frac * bankroll_default, 0)
   return min(raw_stake, max_stake_cap)
 
-
+# Add kelly stake to the main dataframe
 df["kelly_stake"] = df.apply(calc_kelly_capped, axis=1)
 
-# Assign Value Status
+# Assign Value Status Flag
 df["Overlay Flag"] = df.apply(
     lambda r: "🔥 PRIME OVERLAY"
     if (
@@ -450,6 +441,17 @@ df["Overlay Flag"] = df.apply(
     else ("✅ MILD VALUE" if r["EV"] > 0.0 else "❌ UNDERLAY"),
     axis=1,
 )
+
+# ==========================================
+# UPGRADE 1: PRIME OVERLAY FILTER (Done AFTER Kelly calculation)
+# ==========================================
+# Filter strict Prime Overlay Zone: PWIN >= 8.0%, Live Odds <= 35.0, +0.15 <= EV <= +2.50
+prime_overlays = df[
+    (df["pwin_val"] >= 0.08)
+    & (df["live_val"] <= 35.0)
+    & (df["EV"] >= 0.15)
+    & (df["EV"] <= 2.50)
+].sort_values(by="EV", ascending=False)
 
 # ==========================================
 # 🚨 2-MINUTE EXECUTIVE ACTION BET SLIP
@@ -497,7 +499,7 @@ with slip_col2:
   box_horses = list(dict.fromkeys(top_2_pwin + top_2_overlays))[:4]
   box_str = ", ".join([f"#{h}" for h in box_horses])
 
-  st.success(f"**Box 4 Selections:** **({box_str})** — 6 Total Combinations")
+  st.success(f"**Box 4 Selections:** **({box_str})** — Max 6 Combinations")
 
   # Calculate pair matrices
   df_pairs = calculate_q_pq_matrix(df)
