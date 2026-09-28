@@ -35,6 +35,7 @@ def get_db_connection():
   return psycopg2.connect(NEON_DB_URL)
 
 
+# Compress uploaded image in memory to reduce network payload
 def compress_image_bytes(image_bytes, max_dim=1000, quality=70):
   try:
     img = Image.open(io.BytesIO(image_bytes))
@@ -82,7 +83,6 @@ def calculate_q_pq_matrix(df_runners):
       if k == i or k == j:
         continue
 
-      # 6 permutations for top 3 (i, j, k)
       denom_i = 1.0 - pi
       denom_ij = 1.0 - pi - pj
       p_ijk = (
@@ -205,6 +205,7 @@ with st.expander(
       ["📸 Upload Odds Screenshots (AI OCR)", "✏️ Quick String Paste"]
   )
 
+  # --- TAB 1: BATCH OCR ---
   with tab_ocr:
     st.markdown("Upload one or multiple screenshots of the odds board.")
     uploaded_files = st.file_uploader(
@@ -337,6 +338,7 @@ with st.expander(
         time.sleep(1)
         st.rerun()
 
+  # --- TAB 2: MANUAL STRING PASTE (FORM WRAPPED) ---
   with tab_manual:
     st.markdown("Paste odds string in format: `1=3.5 2=12.0 3=5.2` or line-by-line")
     with st.form("manual_odds_form"):
@@ -369,7 +371,7 @@ with st.expander(
           st.rerun()
 
 # ==========================================
-# FETCH DATA FOR SELECTED RACE
+# FETCH DATA & QUANT CALCULATIONS
 # ==========================================
 conn = get_db_connection()
 query = """
@@ -391,10 +393,49 @@ df["pwin_val"] = df["model_pwin"].fillna(0).astype(float)
 df["live_val"] = df["live_odds"].fillna(10.0).astype(float)
 df["market_prob"] = df["live_val"].apply(lambda x: (1.0 / x) if x > 0 else 0.0)
 df["EV"] = (df["pwin_val"] * df["live_val"]) - 1.0
-df["Overlay Flag"] = df["EV"].apply(
-    lambda x: "🔥 VALUE OVERLAY"
-    if x > 0.15
-    else ("✅ MILD VALUE" if x > 0.0 else "❌ UNDERLAY")
+
+# STATUS BANNER
+has_live_odds = (
+    df["live_odds"].notnull().any()
+    and (df["live_odds"] > 0).any()
+    and not (df["live_odds"] == 10.0).all()
+)
+
+if not has_live_odds:
+  st.warning(
+      "⚠️ Live Odds Not Synced! Displaying baseline odds (10.0). Sync screenshots"
+      " above or paste manually."
+  )
+else:
+  st.success("🟢 Live Odds Synced & Active!")
+
+# ==========================================
+# PRIME OVERLAY FILTERING LOGIC
+# ==========================================
+# Filter runners in the "Prime Overlay Zone" (PWIN >= 8% AND EV > +0.15)
+prime_overlays = df[(df["pwin_val"] >= 0.08) & (df["EV"] > 0.15)]
+
+if not prime_overlays.empty:
+  top_recommendation = prime_overlays.loc[prime_overlays["EV"].idxmax()]
+  rec_title = "🎯 Top Prime Value Bet"
+  rec_delta = (
+      f"EV {top_recommendation['EV']:+.2f} (PWIN"
+      f" {top_recommendation['pwin_val']*100:.1f}%)"
+  )
+else:
+  top_recommendation = df.loc[df["pwin_val"].idxmax()]
+  rec_title = "🥇 Top PWIN Pick (No Overlay)"
+  rec_delta = (
+      f"PWIN {top_recommendation['pwin_val']*100:.1f}% (EV"
+      f" {top_recommendation['EV']:+.2f})"
+  )
+
+# Assign Overlay Flag with Prime Overlay distinction
+df["Overlay Flag"] = df.apply(
+    lambda r: "🔥 PRIME OVERLAY"
+    if (r["pwin_val"] >= 0.08 and r["EV"] > 0.15)
+    else ("✅ MILD VALUE" if r["EV"] > 0.0 else "❌ UNDERLAY"),
+    axis=1,
 )
 
 # ==========================================
@@ -410,21 +451,21 @@ tab_win, tab_q, tab_pq = st.tabs([
 # --- TAB 1: WIN POOL ANALYTICS ---
 with tab_win:
   st.subheader("⚡ WIN Executive Summary")
+
   top_pwin_row = df.loc[df["pwin_val"].idxmax()]
-  top_ev_row = df.loc[df["EV"].idxmax()]
   total_overround = df["market_prob"].sum() * 100
-  value_count = len(df[df["EV"] > 0.0])
+  prime_value_count = len(prime_overlays)
 
   m1, m2, m3, m4 = st.columns(4)
   m1.metric(
-      "🥇 Top Model Pick",
+      "🥇 Top Model PWIN Pick",
       f"#{top_pwin_row['horse_no']} {top_pwin_row['horse_name']}",
       f"{top_pwin_row['pwin_val']*100:.1f}% PWIN",
   )
   m2.metric(
-      "🔥 Top WIN Overlay",
-      f"#{top_ev_row['horse_no']} {top_ev_row['horse_name']}",
-      f"EV {top_ev_row['EV']:+.2f}",
+      rec_title,
+      f"#{top_recommendation['horse_no']} {top_recommendation['horse_name']}",
+      rec_delta,
   )
   m3.metric(
       "📈 Win Overround Margin",
@@ -432,10 +473,109 @@ with tab_win:
       f"{total_overround - 100:+.1f}% Take",
   )
   m4.metric(
-      "🎯 WIN Overlays", f"{value_count} Runners", f"Field Size: {len(df)}"
+      "🎯 Prime Value Overlays",
+      f"{prime_value_count} Qualified",
+      f"Field Size: {len(df)}",
   )
 
-  st.markdown("### 📋 WIN Racecard Matrix")
+  # Interactive Visual Analytics
+  st.markdown("---")
+  st.markdown("### 📊 Model vs. Market Mispricing Analysis")
+
+  chart_col1, chart_col2 = st.columns(2)
+
+  with chart_col1:
+    st.markdown(
+        "**Probability Comparison (Model PWIN % vs. Market Implied %)**"
+    )
+    chart_df = pd.DataFrame({
+        "Horse": df.apply(
+            lambda r: f"#{r['horse_no']} {r['horse_name']}", axis=1
+        ),
+        "Model PWIN %": df["pwin_val"] * 100,
+        "Market Implied %": df["market_prob"] * 100,
+    }).set_index("Horse")
+    st.bar_chart(chart_df, height=300)
+
+  with chart_col2:
+    st.markdown("**Expected Value (EV) Profile by Runner**")
+    ev_chart_df = pd.DataFrame({
+        "Horse": df.apply(
+            lambda r: f"#{r['horse_no']} {r['horse_name']}", axis=1
+        ),
+        "Expected Value (EV)": df["EV"],
+    }).set_index("Horse")
+    st.bar_chart(ev_chart_df, height=300)
+
+  # Kelly Staking & Bet Sizing Calculator
+  st.markdown("---")
+  st.markdown("### 💰 Recommended Kelly Bet Sizing")
+
+  k_col1, k_col2 = st.columns([1, 2])
+
+  with k_col1:
+    bankroll = st.number_input(
+        "Session Bankroll ($ HKD)",
+        min_value=100,
+        value=10000,
+        step=500,
+        key="kelly_bankroll",
+    )
+    kelly_fraction = st.slider(
+        "Kelly Fraction (Risk Model)",
+        min_value=0.10,
+        max_value=1.00,
+        value=0.25,
+        step=0.05,
+        help="0.25 = Quarter Kelly (Recommended for sports betting variance)",
+    )
+
+  with k_col2:
+
+    def calc_kelly_stake(row):
+      p = row["pwin_val"]
+      b = row["live_val"] - 1.0
+      if b <= 0 or p <= 0:
+        return 0.0
+      q = 1.0 - p
+      f_star = (p * b - q) / b
+      if f_star <= 0:
+        return 0.0
+      adjusted_stake = f_star * kelly_fraction * bankroll
+      return round(adjusted_stake, 0)
+
+    df["kelly_stake"] = df.apply(calc_kelly_stake, axis=1)
+    stake_qualified = df[
+        (df["pwin_val"] >= 0.08) & (df["EV"] > 0.0) & (df["kelly_stake"] > 0)
+    ].copy()
+
+    if stake_qualified.empty:
+      st.info(
+          "ℹ️ No qualified positive EV overlays (PWIN >= 8%) detected. Kelly"
+          " Model recommends NO BET."
+      )
+    else:
+      stake_summary = pd.DataFrame({
+          "No.": stake_qualified["horse_no"],
+          "Horse Name": stake_qualified["horse_name"],
+          "Model PWIN %": stake_qualified["pwin_val"].apply(
+              lambda x: f"{x*100:.2f}%"
+          ),
+          "Live Odds": stake_qualified["live_val"].apply(
+              lambda x: f"{x:.1f}"
+          ),
+          "Expected Value": stake_qualified["EV"].apply(
+              lambda x: f"{x:+.2f}"
+          ),
+          "Recommended Stake ($ HKD)": stake_qualified["kelly_stake"].apply(
+              lambda x: f"${x:,.0f}"
+          ),
+      })
+      st.dataframe(stake_summary, use_container_width=True, hide_index=True)
+
+  # Full Racecard Matrix
+  st.markdown("---")
+  st.markdown("### 📋 Full WIN Racecard Matrix")
   df_win_disp = df.copy()
   df_win_disp.rename(
       columns={
@@ -491,20 +631,21 @@ with tab_q:
   st.subheader("🎯 Quinella (Q) Joint Probability & Fair Odds Matrix")
   st.markdown(
       "Quinella requires selecting the **1st and 2nd** horses in any order."
-      " Probabilities are generated via the Harville Multi-Runner Model."
+      " Joint probabilities are calculated using the Harville model."
   )
 
   df_pairs = calculate_q_pq_matrix(df)
   df_q_sorted = df_pairs.sort_values(by="Q Model %", ascending=False).copy()
 
-  # Format columns for display
   df_q_display = pd.DataFrame({
       "Pair": df_q_sorted["Pair"],
       "Horse Names": df_q_sorted["Runners"],
       "Model Q Probability": df_q_sorted["Q Model %"].apply(
           lambda x: f"{x:.2f}%"
       ),
-      "Fair Q Odds": df_q_sorted["Fair Q Odds"].apply(lambda x: f"${x:.2f}"),
+      "Fair Minimum Q Odds": df_q_sorted["Fair Q Odds"].apply(
+          lambda x: f"${x:.2f}"
+      ),
   })
 
   top_q_pair = df_q_sorted.iloc[0]
@@ -533,7 +674,9 @@ with tab_pq:
       "Model PQ Probability": df_pq_sorted["PQ Model %"].apply(
           lambda x: f"{x:.2f}%"
       ),
-      "Fair PQ Odds": df_pq_sorted["Fair PQ Odds"].apply(lambda x: f"${x:.2f}"),
+      "Fair Minimum PQ Odds": df_pq_sorted["Fair PQ Odds"].apply(
+          lambda x: f"${x:.2f}"
+      ),
   })
 
   top_pq_pair = df_pq_sorted.iloc[0]
