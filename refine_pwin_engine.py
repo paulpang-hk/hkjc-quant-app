@@ -32,13 +32,17 @@ def calculate_refined_pwin(df_race, alpha=0.65):
   df["model_pwin"] = df["model_pwin"].fillna(0.01).astype(float)
   df["live_odds"] = df["live_odds"].fillna(10.0).astype(float)
 
-  # Extract optional penalty columns if present in DB schema, otherwise set defaults
+  # Safely handle missing optional columns if not present in DB schema
   if "career_starts" not in df.columns:
     df["career_starts"] = 0
   if "career_places" not in df.columns:
     df["career_places"] = 0
   if "health_notes" not in df.columns:
     df["health_notes"] = ""
+
+  df["career_starts"] = df["career_starts"].fillna(0).astype(int)
+  df["career_places"] = df["career_places"].fillna(0).astype(int)
+  df["health_notes"] = df["health_notes"].fillna("").astype(str)
 
   # 1. Calculate Maiden Zero-Place Penalty
   def get_place_penalty(row):
@@ -56,7 +60,7 @@ def calculate_refined_pwin(df_race, alpha=0.65):
     penalty = 1.0
     if "lame" in text:
       penalty *= 0.50
-    if "unacceptable performance" in text:
+    if "unacceptable performance" in text or "unacceptable" in text:
       penalty *= 0.60
     if "withdrawn" in text:
       penalty *= 0.80
@@ -115,11 +119,9 @@ def run_pipeline():
   updated_records = 0
 
   for race_date, race_no in races:
+    # Use SELECT * to prevent SQL UndefinedColumn errors
     query = """
-            SELECT horse_no, model_pwin, live_odds, 
-                   COALESCE(career_starts, 0) as career_starts, 
-                   COALESCE(career_places, 0) as career_places, 
-                   COALESCE(health_notes, '') as health_notes
+            SELECT *
             FROM model_pwin_results
             WHERE race_date = %s AND race_no = %s;
         """
