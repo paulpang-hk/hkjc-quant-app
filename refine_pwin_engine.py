@@ -20,16 +20,43 @@ def get_db_connection():
 
 
 # ==========================================
-# HEAD-TO-HEAD (H2H) MATRIX CALCULATOR (IN-MEMORY)
+# HENERY RUNNING-STYLE CORRELATION HELPERS
+# ==========================================
+def detect_running_style(in_running_text):
+  """Extracts running style from first sectional running position."""
+  text = str(in_running_text).strip()
+  if not text or text == "None" or text == "nan":
+    return "MID"
+
+  try:
+    first_pos = int(text.split("-")[0])
+    if first_pos <= 3:
+      return "LEADER"
+    elif first_pos <= 7:
+      return "MID"
+    else:
+      return "CLOSER"
+  except Exception:
+    return "MID"
+
+
+def calculate_henery_pair_multiplier(style_a, style_b):
+  """Applies Henery correlation dampening based on running style interaction."""
+  if style_a == "LEADER" and style_b == "LEADER":
+    return 0.70  # 30% penalty: Dual leaders burn out early pace
+  elif style_a == "CLOSER" and style_b == "CLOSER":
+    return 0.85  # 15% penalty: Both vulnerable in slow-paced races
+  else:
+    return 1.00  # Optimal tactical complement
+
+
+# ==========================================
+# HEAD-TO-HEAD (H2H) MATRIX CALCULATOR
 # ==========================================
 def calculate_h2h_multipliers(
     df_race, df_all, pos_col, min_encounters=2, penalty_factor=0.15
 ):
-  """Analyzes in-memory historical race results to detect pairwise dominance
-
-  between runners in the current race field. Returns a dict of {horse_no:
-  h2h_multiplier}.
-  """
+  """Analyzes in-memory historical race results to detect pairwise dominance."""
   multipliers = {int(h_no): 1.0 for h_no in df_race["horse_no"]}
 
   if pos_col is None or df_all is None or df_all.empty:
@@ -40,7 +67,6 @@ def calculate_h2h_multipliers(
     return multipliers
 
   try:
-    # Filter historical data for horses in the current race with valid finish positions
     df_history = df_all[
         (df_all["horse_name"].isin(horse_names)) & (df_all[pos_col].notnull())
     ].copy()
@@ -51,7 +77,6 @@ def calculate_h2h_multipliers(
     if df_history.empty:
       return multipliers
 
-    # Group by past race event (race_date, race_no)
     grouped = df_history.groupby(["race_date", "race_no"])
     h2h_stats = {}
 
@@ -86,20 +111,17 @@ def calculate_h2h_multipliers(
         wins_a = stats[name_a]
         wins_b = stats[name_b]
 
-        # Name B completely dominates Name A (100% loss rate for A)
         if wins_a == 0 and wins_b == total_meets:
           h_no_a = name_to_no.get(name_a)
           if h_no_a in multipliers:
             multipliers[h_no_a] *= 1.0 - penalty_factor
-
-        # Name A completely dominates Name B (100% loss rate for B)
         elif wins_b == 0 and wins_a == total_meets:
           h_no_b = name_to_no.get(name_b)
           if h_no_b in multipliers:
             multipliers[h_no_b] *= 1.0 - penalty_factor
 
   except Exception as e:
-    print(f"⚠️ H2H Calculation notice: {e}")
+    print(f"⚠️ H2H Notice: {e}")
 
   return multipliers
 
@@ -108,29 +130,29 @@ def calculate_h2h_multipliers(
 # REFINEMENT ENGINE CORE LOGIC
 # ==========================================
 def calculate_refined_pwin(df_race, df_all, pos_col, alpha=0.65):
-  """Applies Bayesian place penalties, health dampening, H2H matrix dampening,
+  """Applies Bayesian place penalties, health dampening, H2H dampening,
 
   and market shrinkage to recalculate clean PWIN and Fair Odds.
   """
   df = df_race.copy()
 
-  # Ensure numerical types
   df["model_pwin"] = df["model_pwin"].fillna(0.01).astype(float)
   df["live_odds"] = df["live_odds"].fillna(10.0).astype(float)
 
-  # Safely handle missing optional columns if not present in DB schema
   if "career_starts" not in df.columns:
     df["career_starts"] = 0
   if "career_places" not in df.columns:
     df["career_places"] = 0
   if "health_notes" not in df.columns:
     df["health_notes"] = ""
+  if "in_running" not in df.columns:
+    df["in_running"] = ""
 
   df["career_starts"] = df["career_starts"].fillna(0).astype(int)
   df["career_places"] = df["career_places"].fillna(0).astype(int)
   df["health_notes"] = df["health_notes"].fillna("").astype(str)
 
-  # 1. Calculate Maiden Zero-Place Penalty
+  # 1. Maiden Zero-Place Penalty
   def get_place_penalty(row):
     if row["career_starts"] >= 5 and row["career_places"] == 0:
       return 0.20
@@ -140,7 +162,7 @@ def calculate_refined_pwin(df_race, df_all, pos_col, alpha=0.65):
 
   df["place_multiplier"] = df.apply(get_place_penalty, axis=1)
 
-  # 2. Calculate Health / Veterinary Penalty
+  # 2. Health / Veterinary Penalty
   def get_health_penalty(notes):
     text = str(notes).lower()
     penalty = 1.0
@@ -154,13 +176,16 @@ def calculate_refined_pwin(df_race, df_all, pos_col, alpha=0.65):
 
   df["health_multiplier"] = df["health_notes"].apply(get_health_penalty)
 
-  # 3. Calculate Direct Head-to-Head (H2H) Multipliers
+  # 3. Direct Head-to-Head (H2H) Multipliers
   h2h_map = calculate_h2h_multipliers(
       df, df_all, pos_col, min_encounters=2, penalty_factor=0.15
   )
   df["h2h_multiplier"] = df["horse_no"].map(h2h_map).fillna(1.0)
 
-  # 4. Apply All Compound Penalties to Raw PWIN
+  # 4. Running Style & Henery Adjustment
+  df["running_style"] = df["in_running"].apply(detect_running_style)
+
+  # 5. Apply All Penalties to Raw PWIN
   df["pwin_adjusted"] = (
       df["model_pwin"]
       * df["place_multiplier"]
@@ -168,7 +193,7 @@ def calculate_refined_pwin(df_race, df_all, pos_col, alpha=0.65):
       * df["h2h_multiplier"]
   )
 
-  # 5. Market Probability Blending (Shrinkage)
+  # 6. Market Probability Blending (Shrinkage)
   df["market_prob"] = df["live_odds"].apply(
       lambda odds: (1.0 / odds) if odds > 0 else 0.05
   )
@@ -176,14 +201,14 @@ def calculate_refined_pwin(df_race, df_all, pos_col, alpha=0.65):
       (1.0 - alpha) * df["market_prob"]
   )
 
-  # 6. Field Re-normalization (Sum = 1.0)
+  # 7. Field Re-normalization
   field_sum = df["pwin_blended"].sum()
   if field_sum > 0:
     df["model_pwin_refined"] = df["pwin_blended"] / field_sum
   else:
     df["model_pwin_refined"] = 1.0 / len(df)
 
-  # 7. Recalculate Fair Odds
+  # 8. Recalculate Fair Odds
   df["fair_odds_refined"] = df["model_pwin_refined"].apply(
       lambda p: round(1.0 / p, 2) if p > 0 else 999.0
   )
@@ -202,7 +227,6 @@ def run_pipeline():
   conn = get_db_connection()
   cur = conn.cursor()
 
-  # Load full table into memory safely
   df_all = pd.read_sql("SELECT * FROM model_pwin_results;", conn)
 
   if df_all.empty:
@@ -210,7 +234,6 @@ def run_pipeline():
     conn.close()
     return
 
-  # Detect finishing position column safely
   pos_col = None
   for candidate in [
       "finish_position",
@@ -224,15 +247,6 @@ def run_pipeline():
       pos_col = candidate
       break
 
-  if pos_col:
-    print(f"🎯 Detected finishing position column: '{pos_col}' for H2H Matrix.")
-  else:
-    print(
-        "ℹ️ Note: Finishing position column not found in schema yet. Proceeding"
-        " with Bayesian & Health refinements."
-    )
-
-  # Get distinct races
   races = (
       df_all[["race_date", "race_no"]]
       .drop_duplicates()
@@ -252,10 +266,8 @@ def run_pipeline():
     if df_race.empty:
       continue
 
-    # Execute mathematical refinement
     df_refined = calculate_refined_pwin(df_race, df_all, pos_col, alpha=0.65)
 
-    # Prepare batch update data
     update_data = []
     for _, r in df_refined.iterrows():
       update_data.append((
@@ -266,7 +278,6 @@ def run_pipeline():
           int(r["horse_no"]),
       ))
 
-    # Bulk update Neon DB
     update_query = """
             UPDATE model_pwin_results
             SET model_pwin = %s,
