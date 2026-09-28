@@ -2,6 +2,7 @@
 import base64
 import io
 import json
+import re
 import time
 import pandas as pd
 from PIL import Image
@@ -125,7 +126,7 @@ with st.expander(
     )
 
     uploaded_files = st.file_uploader(
-        "Choose HKJC / on.cc Odds Screenshots (Select up to 11 files)...",
+        "Choose HKJC / on.cc Odds Screenshots...",
         type=["png", "jpg", "jpeg", "webp"],
         accept_multiple_files=True,
         key="batch_ocr_uploader",
@@ -153,7 +154,7 @@ with st.expander(
           )
 
           try:
-            # 1. Compress image in memory
+            # Compress image in memory
             raw_bytes = uploaded_file.getvalue()
             compressed_bytes, mime_type = compress_image_bytes(raw_bytes)
             base64_image = base64.b64encode(compressed_bytes).decode("utf-8")
@@ -193,7 +194,6 @@ with st.expander(
                 }],
             }
 
-            # Retry loop with rate-limit mitigation
             res = None
             for attempt in range(3):
               try:
@@ -202,7 +202,7 @@ with st.expander(
                 )
                 if res.status_code in [402, 429]:
                   status_text.text(
-                      f"⏳ OpenRouter rate limit hit. Pausing 8s before retrying"
+                      f"⏳ Rate limit hit. Pausing 8s before retrying"
                       f" {uploaded_file.name} (Attempt {attempt+1}/3)..."
                   )
                   time.sleep(8)
@@ -210,8 +210,7 @@ with st.expander(
                   break
               except requests.exceptions.RequestException:
                 status_text.text(
-                    f"⏳ Timeout on attempt {attempt+1}/3. Retrying"
-                    f" {uploaded_file.name}..."
+                    f"⏳ Timeout. Retrying {uploaded_file.name} (Attempt {attempt+1}/3)..."
                 )
                 time.sleep(4)
 
@@ -232,7 +231,6 @@ with st.expander(
               odds_map = parsed_data.get("odds", {})
 
               if parsed_race_no and odds_map:
-                # Immediate atomic DB commit
                 db_conn = get_db_connection()
                 db_cur = db_conn.cursor()
 
@@ -274,17 +272,15 @@ with st.expander(
             else:
               err_code = str(res.status_code) if res else "Timeout"
               st.warning(
-                  f"⚠️ Skipped {uploaded_file.name} due to OpenRouter API response"
+                  f"⚠️ Skipped {uploaded_file.name} due to API response"
                   f" ({err_code}). Continuing batch..."
               )
 
           except Exception as ex:
             st.warning(
-                f"⚠️ Error processing {uploaded_file.name}: {ex}. Skipping to"
-                " next file."
+                f"⚠️ Error processing {uploaded_file.name}: {ex}. Skipping to next file."
             )
 
-          # 5-second pacing delay to let OpenRouter in-flight budget reset
           time.sleep(5)
           progress_bar.progress((idx + 1) / total_files)
 
@@ -294,32 +290,46 @@ with st.expander(
         time.sleep(1)
         st.rerun()
 
-  # --- TAB 2: MANUAL STRING PASTE ---
+  # --- TAB 2: MANUAL STRING PASTE (FIXED ST.FORM) ---
   with tab_manual:
     st.markdown("Paste odds string in format: `1=3.5 2=12.0 3=5.2` or line-by-line")
-    manual_input = st.text_area("Live Odds String", height=100)
-    if st.button("💾 Apply Manual Odds to Current Race"):
-      if manual_input.strip():
-        import re
-
-        pairs = re.findall(r"(\d+)=([\d\.]+)", manual_input)
-        if pairs:
-          db_conn = get_db_connection()
-          db_cur = db_conn.cursor()
-          for h_no, o_val in pairs:
-            db_cur.execute(
-                """
-                            UPDATE model_pwin_results 
-                            SET live_odds = %s 
-                            WHERE race_date = %s AND race_no = %s AND horse_no = %s;
-                        """,
-                (float(o_val), selected_date, selected_race, int(h_no)),
-            )
-          db_conn.commit()
-          db_cur.close()
-          db_conn.close()
-          st.success(f"✅ Updated {len(pairs)} runners for Race {selected_race}!")
-          st.rerun()
+    
+    # Wrapped in st.form to force Streamlit to wait for button click
+    with st.form("manual_odds_form"):
+      manual_input = st.text_area("Live Odds String", height=100)
+      submit_manual = st.form_submit_button("💾 Apply Manual Odds to Current Race")
+      
+      if submit_manual:
+        if manual_input.strip():
+          # Regex allows spaces (e.g. "1 = 5.8")
+          pairs = re.findall(r"(\d+)\s*=\s*([0-9\.]+)", manual_input)
+          if pairs:
+            try:
+              db_conn = get_db_connection()
+              db_cur = db_conn.cursor()
+              for h_no, o_val in pairs:
+                db_cur.execute(
+                    """
+                                UPDATE model_pwin_results 
+                                SET live_odds = %s 
+                                WHERE race_date = %s AND race_no = %s AND horse_no = %s;
+                            """,
+                    (float(o_val), selected_date, selected_race, int(h_no)),
+                )
+              db_conn.commit()
+              db_cur.close()
+              db_conn.close()
+              
+              st.success(f"✅ Successfully updated {len(pairs)} runners for Race {selected_race}!")
+              time.sleep(1.5)  # Wait so you can read the success message
+              st.rerun()
+              
+            except Exception as e:
+              st.error(f"❌ Database error: {e}")
+          else:
+            st.error("⚠️ No valid odds found! Please use format: `1=5.8`")
+        else:
+          st.warning("⚠️ Text box is empty. Please paste odds first.")
 
 # ==========================================
 # FETCH DATA FOR SELECTED RACE
