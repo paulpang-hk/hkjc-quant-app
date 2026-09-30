@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
+import re
 import numpy as np
 import pandas as pd
 import psycopg2
@@ -43,13 +44,21 @@ st.markdown(
         font-weight: bold;
         display: inline-block;
     }
+    .status-badge-blue {
+        background-color: #032b43;
+        color: #63b3ed;
+        padding: 6px 12px;
+        border-radius: 6px;
+        font-weight: bold;
+        display: inline-block;
+    }
     </style>
 """,
     unsafe_allow_html=True,
 )
 
 # ==========================================
-# NEON DB CONNECTION & DATA LOADERS (AUTO-RECONNECT FIX)
+# NEON DB CONNECTION & DATA LOADERS
 # ==========================================
 NEON_DB_URL = os.environ.get(
     "NEON_DB_URL",
@@ -177,6 +186,37 @@ if df_race.empty:
   )
   st.stop()
 
+# ==========================================
+# FAST MANUAL ODDS OVERRIDE (SIDEBAR)
+# ==========================================
+manual_odds_active = False
+
+with st.sidebar:
+  st.header("⚡ Fast Odds Override")
+  st.caption("Input format: `1=4.5, 2=12, 3=2.1`")
+  
+  manual_odds_str = st.text_area(
+      "Type Live Odds Here:", 
+      height=120,
+      placeholder="1=3.5\n2=4.0\n3=12"
+  )
+  
+  if manual_odds_str.strip():
+    # Use Regex to intelligently find all "number=number" patterns
+    matches = re.findall(r"(\d+)\s*[=:]\s*(\d+(?:\.\d+)?)", manual_odds_str)
+    
+    if matches:
+      for h_str, odds_str in matches:
+        h_no = int(h_str)
+        odds_val = float(odds_str)
+        # Update the live odds in the dataframe memory directly
+        df_race.loc[df_race["horse_no"] == h_no, "live_odds"] = odds_val
+      
+      manual_odds_active = True
+      st.success(f"✅ Applied manual odds for {len(matches)} horses!")
+    else:
+      st.error("⚠️ Invalid format. Example: 1=4.5, 2=12")
+
 # Auto-detect race class
 race_class = (
     df_race["race_class"].iloc[0]
@@ -185,28 +225,32 @@ race_class = (
 )
 dynamic_ev_min = get_dynamic_ev_threshold(race_class)
 
-# Apply Kelly & EV calculations
+# Apply Kelly & EV calculations using potentially overridden odds
 df_calc = calculate_kelly_and_ev(df_race, bankroll=10000, kelly_fraction=0.25)
 
 # ==========================================
 # ODDS INGESTION STATUS INDICATOR BAR
 # ==========================================
-has_live_odds = (
+has_db_live_odds = (
     df_calc["live_odds"] > 0
 ).any() and not (df_calc["live_odds"] == 10.0).all()
 
 col_m1, col_m2, col_m3 = st.columns(3)
 
 with col_m1:
-  if has_live_odds:
+  if manual_odds_active:
     st.markdown(
-        '<div class="status-badge-green">🟢 Live Odds Ingested & Active</div>',
+        '<div class="status-badge-blue">⚡ Manual Odds Override Active</div>',
+        unsafe_allow_html=True,
+    )
+  elif has_db_live_odds:
+    st.markdown(
+        '<div class="status-badge-green">🟢 DB Live Odds Active</div>',
         unsafe_allow_html=True,
     )
   else:
     st.markdown(
-        '<div class="status-badge-yellow">🟡 Pre-Betting / Default Odds'
-        " (Pending Live Sync)</div>",
+        '<div class="status-badge-yellow">🟡 Pending Live Odds</div>',
         unsafe_allow_html=True,
     )
 
@@ -342,8 +386,6 @@ with st.expander("📋 Full Field Live Odds & Model Verification Table", expande
   df_table = pd.DataFrame({
       "No.": df_display_all["horse_no"].astype(int),
       "Horse": df_display_all["horse_name"],
-      "Jockey": df_display_all["jockey"],
-      "Trainer": df_display_all["trainer"],
       "Draw": df_display_all["draw"].astype(int),
       "Model PWIN %": (df_display_all["model_pwin"] * 100).map("{:.1f}%".format),
       "Fair Odds": df_display_all["fair_odds"].map("${:.2f}".format),
@@ -357,44 +399,3 @@ with st.expander("📋 Full Field Live Odds & Model Verification Table", expande
   })
 
   st.dataframe(df_table, use_container_width=True, hide_index=True)
-
-# ==========================================
-# MODEL VS MARKET MISPRICING ANALYSIS
-# ==========================================
-st.markdown("---")
-st.subheader("📊 Model vs. Market Mispricing Analysis")
-
-col_chart1, col_chart2 = st.columns(2)
-
-df_calc["market_implied"] = df_calc["live_odds"].apply(
-    lambda x: (1.0 / x) * 100.0 if x > 0 else 0.0
-)
-df_calc["model_pwin_pct"] = df_calc["model_pwin"] * 100.0
-
-with col_chart1:
-  st.markdown("**Probability Comparison (Model PWIN % vs. Market Implied %)**")
-  chart_data = df_calc[
-      ["horse_no", "horse_name", "model_pwin_pct", "market_implied"]
-  ].copy()
-  chart_data["Horse"] = (
-      "#"
-      + chart_data["horse_no"].astype(str)
-      + " "
-      + chart_data["horse_name"]
-  )
-  chart_data = chart_data.set_index("Horse")[
-      ["model_pwin_pct", "market_implied"]
-  ]
-  st.bar_chart(chart_data)
-
-with col_chart2:
-  st.markdown("**Expected Value (EV) Profile by Runner**")
-  ev_chart_data = df_calc[["horse_no", "horse_name", "ev_edge"]].copy()
-  ev_chart_data["Horse"] = (
-      "#"
-      + ev_chart_data["horse_no"].astype(str)
-      + " "
-      + ev_chart_data["horse_name"]
-  )
-  ev_chart_data = ev_chart_data.set_index("Horse")[["ev_edge"]]
-  st.bar_chart(ev_chart_data)
