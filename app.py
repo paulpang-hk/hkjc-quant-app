@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-import itertools
 import os
 import numpy as np
 import pandas as pd
@@ -41,7 +40,7 @@ st.markdown(
 )
 
 # ==========================================
-# NEON DB CONNECTION & DATA LOADERS
+# NEON DB CONNECTION & DATA LOADERS (AUTO-RECONNECT FIX)
 # ==========================================
 NEON_DB_URL = os.environ.get(
     "NEON_DB_URL",
@@ -49,9 +48,9 @@ NEON_DB_URL = os.environ.get(
 )
 
 
-@st.cache_resource
 def get_db_connection():
-  return psycopg2.connect(NEON_DB_URL)
+  """Creates a fresh, un-cached connection to avoid Neon SSL idle timeouts."""
+  return psycopg2.connect(NEON_DB_URL, connect_timeout=10)
 
 
 def load_race_dates():
@@ -62,6 +61,7 @@ def load_race_dates():
         " DESC;"
     )
     df = pd.read_sql(query, conn)
+    conn.close()  # Safely close connection
     return df["race_date"].tolist()
   except Exception as e:
     st.error(f"Error loading race dates from database: {e}")
@@ -78,6 +78,7 @@ def load_race_data(race_date, race_no):
             ORDER BY horse_no ASC;
         """
     df = pd.read_sql(query, conn, params=(str(race_date), int(race_no)))
+    conn.close()  # Safely close connection
     return df
   except Exception as e:
     st.error(f"Error loading race data: {e}")
@@ -90,9 +91,9 @@ def load_race_data(race_date, race_no):
 def get_dynamic_ev_threshold(race_class):
   """Returns dynamic EV threshold based on market efficiency per race class.
 
-  - Class 1 / 2 / Group: High efficiency -> Strict EV (>= +0.25) - Class 3:
-  Standard efficiency -> Standard EV (>= +0.15) - Class 4 / 5 / Griffin /
-  Maiden: High noise -> Looser EV (>= +0.10)
+  - Class 1 / 2 / Group: High efficiency -> Strict EV (>= +0.25)
+  - Class 3: Standard efficiency -> Standard EV (>= +0.15)
+  - Class 4 / 5 / Griffin / Maiden: High noise -> Looser EV (>= +0.10)
   """
   text = str(race_class).lower()
   if any(c in text for c in ["class 1", "class 2", "group", "g1", "g2", "g3"]):
@@ -183,7 +184,10 @@ st.markdown("---")
 st.subheader(
     f"🚨 2-Minute Executive Bet Slip — {selected_date} | Race {selected_race_no}"
 )
-st.caption(f"Race Class: **{race_class}** | Dynamic EV Cutoff: **≥ +{dynamic_ev_min:.2f}**")
+st.caption(
+    f"Race Class: **{race_class}** | Dynamic EV Cutoff: **≥"
+    f" +{dynamic_ev_min:.2f}**"
+)
 
 col_win, col_exotics = st.columns([1, 1])
 
