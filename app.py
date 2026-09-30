@@ -23,16 +23,25 @@ st.markdown(
     .stTable { background-color: #1e222d; border-radius: 8px; }
     .metric-card {
         background-color: #1e222d;
-        padding: 15px;
+        padding: 12px 18px;
         border-radius: 8px;
         border: 1px solid #2e3440;
     }
-    .bet-slip-container {
-        background-color: #131722;
-        padding: 20px;
-        border-radius: 10px;
-        border: 1px solid #2a2e39;
-        margin-bottom: 20px;
+    .status-badge-green {
+        background-color: #1b4332;
+        color: #74c69d;
+        padding: 6px 12px;
+        border-radius: 6px;
+        font-weight: bold;
+        display: inline-block;
+    }
+    .status-badge-yellow {
+        background-color: #4a3b00;
+        color: #ffd166;
+        padding: 6px 12px;
+        border-radius: 6px;
+        font-weight: bold;
+        display: inline-block;
     }
     </style>
 """,
@@ -61,7 +70,7 @@ def load_race_dates():
         " DESC;"
     )
     df = pd.read_sql(query, conn)
-    conn.close()  # Safely close connection
+    conn.close()
     return df["race_date"].tolist()
   except Exception as e:
     st.error(f"Error loading race dates from database: {e}")
@@ -78,7 +87,7 @@ def load_race_data(race_date, race_no):
             ORDER BY horse_no ASC;
         """
     df = pd.read_sql(query, conn, params=(str(race_date), int(race_no)))
-    conn.close()  # Safely close connection
+    conn.close()
     return df
   except Exception as e:
     st.error(f"Error loading race data: {e}")
@@ -89,12 +98,6 @@ def load_race_data(race_date, race_no):
 # DYNAMIC EV & KELLY CALCULATIONS
 # ==========================================
 def get_dynamic_ev_threshold(race_class):
-  """Returns dynamic EV threshold based on market efficiency per race class.
-
-  - Class 1 / 2 / Group: High efficiency -> Strict EV (>= +0.25)
-  - Class 3: Standard efficiency -> Standard EV (>= +0.15)
-  - Class 4 / 5 / Griffin / Maiden: High noise -> Looser EV (>= +0.10)
-  """
   text = str(race_class).lower()
   if any(c in text for c in ["class 1", "class 2", "group", "g1", "g2", "g3"]):
     return 0.25
@@ -105,18 +108,26 @@ def get_dynamic_ev_threshold(race_class):
 
 
 def calculate_kelly_and_ev(df, bankroll=10000.0, kelly_fraction=0.25):
-  """Calculates EV Edge and fractional Kelly stakes for runners."""
   df = df.copy()
 
   df["model_pwin"] = pd.to_numeric(
       df["model_pwin"], errors="coerce"
   ).fillna(0.01)
-  df["live_odds"] = pd.to_numeric(df["live_odds"], errors="coerce").fillna(10.0)
+  df["live_odds"] = pd.to_numeric(df["live_odds"], errors="coerce").fillna(0.0)
 
-  # Expected Value Edge
-  df["ev_edge"] = (df["model_pwin"] * df["live_odds"]) - 1.0
+  # Calculate Fair Odds if missing
+  df["fair_odds"] = df["model_pwin"].apply(
+      lambda p: round(1.0 / p, 2) if p > 0 else 999.0
+  )
 
-  # Fractional Kelly Stake Sizing
+  # Expected Value Edge (only when live odds > 0)
+  df["ev_edge"] = df.apply(
+      lambda r: (r["model_pwin"] * r["live_odds"]) - 1.0
+      if r["live_odds"] > 0
+      else -1.0,
+      axis=1,
+  )
+
   def get_stake(row):
     p = row["model_pwin"]
     b = row["live_odds"] - 1.0
@@ -166,7 +177,7 @@ if df_race.empty:
   )
   st.stop()
 
-# Auto-detect race class or fallback to Class 3
+# Auto-detect race class
 race_class = (
     df_race["race_class"].iloc[0]
     if "race_class" in df_race.columns
@@ -178,15 +189,42 @@ dynamic_ev_min = get_dynamic_ev_threshold(race_class)
 df_calc = calculate_kelly_and_ev(df_race, bankroll=10000, kelly_fraction=0.25)
 
 # ==========================================
+# ODDS INGESTION STATUS INDICATOR BAR
+# ==========================================
+has_live_odds = (
+    df_calc["live_odds"] > 0
+).any() and not (df_calc["live_odds"] == 10.0).all()
+
+col_m1, col_m2, col_m3 = st.columns(3)
+
+with col_m1:
+  if has_live_odds:
+    st.markdown(
+        '<div class="status-badge-green">🟢 Live Odds Ingested & Active</div>',
+        unsafe_allow_html=True,
+    )
+  else:
+    st.markdown(
+        '<div class="status-badge-yellow">🟡 Pre-Betting / Default Odds'
+        " (Pending Live Sync)</div>",
+        unsafe_allow_html=True,
+    )
+
+with col_m2:
+  st.markdown(f"**Total Field:** `{len(df_calc)} Runners`")
+
+with col_m3:
+  st.markdown(
+      f"**Class Filter:** `{race_class}` | Min EV: `≥ +{dynamic_ev_min:.2f}`"
+  )
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# ==========================================
 # 2-MINUTE EXECUTIVE BET SLIP
 # ==========================================
-st.markdown("---")
 st.subheader(
     f"🚨 2-Minute Executive Bet Slip — {selected_date} | Race {selected_race_no}"
-)
-st.caption(
-    f"Race Class: **{race_class}** | Dynamic EV Cutoff: **≥"
-    f" +{dynamic_ev_min:.2f}**"
 )
 
 col_win, col_exotics = st.columns([1, 1])
@@ -195,10 +233,10 @@ col_win, col_exotics = st.columns([1, 1])
 with col_win:
   st.markdown("### 🏆 Top WIN Value Bets (Max 3 Prime Overlays)")
 
-  # Filter Prime Overlays with dynamic EV cutoff & EV cap (<= +2.50)
   df_prime = df_calc[
       (df_calc["model_pwin"] >= 0.08)
       & (df_calc["live_odds"] <= 35.0)
+      & (df_calc["live_odds"] > 0)
       & (df_calc["ev_edge"] >= dynamic_ev_min)
       & (df_calc["ev_edge"] <= 2.50)
   ].copy()
@@ -206,7 +244,6 @@ with col_win:
   if not df_prime.empty:
     df_prime = df_prime.sort_values(by="ev_edge", ascending=False).head(3)
 
-    # Format table output
     display_win = pd.DataFrame({
         "Horse": df_prime["horse_no"].astype(str)
         + " "
@@ -227,7 +264,6 @@ with col_win:
 with col_exotics:
   st.markdown("### 🎯 Exotics Strategy (Box 4 Combination)")
 
-  # Top 2 by Model Probability + Top 2 Prime Overlays
   top_pwin = df_calc.sort_values(by="model_pwin", ascending=False).head(2)
 
   if not df_prime.empty:
@@ -249,7 +285,6 @@ with col_exotics:
       f"**Box 4 Selections: ({', '.join(box_numbers)})** — Max 6 Combinations"
   )
 
-  # Calculate best Pair (Q and PQ)
   if len(box_candidates) >= 2:
     p1 = box_candidates.iloc[0]
     p2 = box_candidates.iloc[1]
@@ -257,7 +292,7 @@ with col_exotics:
     prob_q = (p1["model_pwin"] * p2["model_pwin"]) / (
         1.0 - p1["model_pwin"] + 1e-6
     )
-    prob_pq = prob_q * 2.2  # Approximate Place Quinella scaling factor
+    prob_pq = prob_q * 2.2
 
     fair_q_odds = 1.0 / prob_q if prob_q > 0 else 999.0
     fair_pq_odds = 1.0 / prob_pq if prob_pq > 0 else 999.0
@@ -286,6 +321,44 @@ with col_exotics:
     st.table(exotic_df)
 
 # ==========================================
+# FULL FIELD LIVE ODDS & VERIFICATION MATRIX
+# ==========================================
+st.markdown("---")
+with st.expander("📋 Full Field Live Odds & Model Verification Table", expanded=True):
+  df_display_all = df_calc.copy()
+
+  def get_value_status(row):
+    if row["live_odds"] <= 0 or row["live_odds"] == 10.0:
+      return "🟡 Pending Odds"
+    elif row["ev_edge"] >= dynamic_ev_min:
+      return "🟢 Prime Overlay"
+    elif row["ev_edge"] > 0:
+      return "🔵 Slight Edge"
+    else:
+      return "🔴 Underlay"
+
+  df_display_all["Status"] = df_display_all.apply(get_value_status, axis=1)
+
+  df_table = pd.DataFrame({
+      "No.": df_display_all["horse_no"].astype(int),
+      "Horse": df_display_all["horse_name"],
+      "Jockey": df_display_all["jockey"],
+      "Trainer": df_display_all["trainer"],
+      "Draw": df_display_all["draw"].astype(int),
+      "Model PWIN %": (df_display_all["model_pwin"] * 100).map("{:.1f}%".format),
+      "Fair Odds": df_display_all["fair_odds"].map("${:.2f}".format),
+      "Live Odds": df_display_all["live_odds"].apply(
+          lambda x: f"${x:.1f}" if x > 0 else "N/A"
+      ),
+      "EV Edge": df_display_all["ev_edge"].apply(
+          lambda x: f"+{x:.2f}" if x > -1 else "N/A"
+      ),
+      "Status": df_display_all["Status"],
+  })
+
+  st.dataframe(df_table, use_container_width=True, hide_index=True)
+
+# ==========================================
 # MODEL VS MARKET MISPRICING ANALYSIS
 # ==========================================
 st.markdown("---")
@@ -293,7 +366,9 @@ st.subheader("📊 Model vs. Market Mispricing Analysis")
 
 col_chart1, col_chart2 = st.columns(2)
 
-df_calc["market_implied"] = (1.0 / df_calc["live_odds"]) * 100.0
+df_calc["market_implied"] = df_calc["live_odds"].apply(
+    lambda x: (1.0 / x) * 100.0 if x > 0 else 0.0
+)
 df_calc["model_pwin_pct"] = df_calc["model_pwin"] * 100.0
 
 with col_chart1:
