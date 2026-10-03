@@ -1,401 +1,304 @@
 # -*- coding: utf-8 -*-
 import os
-import re
-import numpy as np
+import math
+import itertools
 import pandas as pd
 import psycopg2
 import streamlit as st
 
-# ==========================================
-# PAGE CONFIGURATION & STYLING
-# ==========================================
+# ==============================================================================
+# STREAMLIT PAGE CONFIGURATION
+# ==============================================================================
 st.set_page_config(
-    page_title="HKJC Quant Strategy Engine",
+    page_title="HKJC Quant PWIN Dashboard",
     page_icon="🏇",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="expanded"
 )
 
-# Dark Theme Custom Styling
-st.markdown(
-    """
+# Custom Dark Mode CSS Styling for Signal Badges
+st.markdown("""
     <style>
     .main { background-color: #0e1117; }
-    .stTable { background-color: #1e222d; border-radius: 8px; }
-    .metric-card {
-        background-color: #1e222d;
-        padding: 12px 18px;
-        border-radius: 8px;
-        border: 1px solid #2e3440;
-    }
-    .status-badge-green {
-        background-color: #1b4332;
-        color: #74c69d;
-        padding: 6px 12px;
-        border-radius: 6px;
-        font-weight: bold;
-        display: inline-block;
-    }
-    .status-badge-yellow {
-        background-color: #4a3b00;
-        color: #ffd166;
-        padding: 6px 12px;
-        border-radius: 6px;
-        font-weight: bold;
-        display: inline-block;
-    }
-    .status-badge-blue {
-        background-color: #032b43;
-        color: #63b3ed;
-        padding: 6px 12px;
-        border-radius: 6px;
-        font-weight: bold;
-        display: inline-block;
-    }
+    .stMetric { background-color: #161b22; padding: 12px; border-radius: 8px; border: 1px solid #30363d; }
+    .go-badge { background-color: #1e3d2f; padding: 12px; border-radius: 8px; border-left: 6px solid #2ea043; margin-bottom: 10px; }
+    .skip-badge { background-color: #3d1e1e; padding: 12px; border-radius: 8px; border-left: 6px solid #da3633; margin-bottom: 10px; }
+    .neutral-badge { background-color: #161b22; padding: 12px; border-radius: 8px; border-left: 6px solid #8b949e; margin-bottom: 10px; }
     </style>
-""",
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
-# ==========================================
-# NEON DB CONNECTION & DATA LOADERS
-# ==========================================
-NEON_DB_URL = os.environ.get(
-    "NEON_DB_URL",
-    "postgresql://neondb_owner:npg_D2YzinaM8grT@ep-snowy-fire-b59poqzm-pooler.c-7.us-east-2.aws.neon.tech/neondb?sslmode=require",
-)
+# ==============================================================================
+# DATABASE CONNECTION MANAGER
+# ==============================================================================
+NEON_DB_URL_DEFAULT = "postgresql://neondb_owner:npg_D2YzinaM8grT@ep-snowy-fire-b59poqzm-pooler.c-7.us-east-2.aws.neon.tech/neondb?sslmode=require"
 
+NAS_DB_CONFIG = {
+    "dbname": "hkracing",
+    "user": "quant_user",
+    "password": "YourStrongPassword123!",
+    "host": "127.0.0.1",
+    "port": 5434,
+    "connect_timeout": 3,
+}
 
+@st.cache_resource(ttl=60)
 def get_db_connection():
-  """Creates a fresh, un-cached connection to avoid Neon SSL idle timeouts."""
-  return psycopg2.connect(NEON_DB_URL, connect_timeout=10)
-
-
-def load_race_dates():
-  try:
-    conn = get_db_connection()
-    query = (
-        "SELECT DISTINCT race_date FROM model_pwin_results ORDER BY race_date"
-        " DESC;"
-    )
-    df = pd.read_sql(query, conn)
-    conn.close()
-    return df["race_date"].tolist()
-  except Exception as e:
-    st.error(f"Error loading race dates from database: {e}")
-    return []
-
-
-def load_race_data(race_date, race_no):
-  try:
-    conn = get_db_connection()
-    query = """
-            SELECT * 
-            FROM model_pwin_results 
-            WHERE race_date = %s AND race_no = %s
-            ORDER BY horse_no ASC;
-        """
-    df = pd.read_sql(query, conn, params=(str(race_date), int(race_no)))
-    conn.close()
-    return df
-  except Exception as e:
-    st.error(f"Error loading race data: {e}")
-    return pd.DataFrame()
-
-
-# ==========================================
-# DYNAMIC EV & KELLY CALCULATIONS
-# ==========================================
-def get_dynamic_ev_threshold(race_class):
-  text = str(race_class).lower()
-  if any(c in text for c in ["class 1", "class 2", "group", "g1", "g2", "g3"]):
-    return 0.25
-  elif "class 3" in text:
-    return 0.15
-  else:
-    return 0.10
-
-
-def calculate_kelly_and_ev(df, bankroll=10000.0, kelly_fraction=0.25):
-  df = df.copy()
-
-  df["model_pwin"] = pd.to_numeric(
-      df["model_pwin"], errors="coerce"
-  ).fillna(0.01)
-  df["live_odds"] = pd.to_numeric(df["live_odds"], errors="coerce").fillna(0.0)
-
-  # Calculate Fair Odds if missing
-  df["fair_odds"] = df["model_pwin"].apply(
-      lambda p: round(1.0 / p, 2) if p > 0 else 999.0
-  )
-
-  # Expected Value Edge (only when live odds > 0)
-  df["ev_edge"] = df.apply(
-      lambda r: (r["model_pwin"] * r["live_odds"]) - 1.0
-      if r["live_odds"] > 0
-      else -1.0,
-      axis=1,
-  )
-
-  def get_stake(row):
-    p = row["model_pwin"]
-    b = row["live_odds"] - 1.0
-    if b <= 0 or p <= 0:
-      return 0.0
-    q = 1.0 - p
-    f = (b * p - q) / b
-    if f <= 0:
-      return 0.0
-    stake = f * kelly_fraction * bankroll
-    return float(np.round(stake, 0))
-
-  df["bet_stake"] = df.apply(get_stake, axis=1)
-  return df
-
-
-# ==========================================
-# UI NAVIGATION & HEADER
-# ==========================================
-st.title("🏇 HKJC Quant Strategy Engine (Cloud Edition)")
-
-race_dates = load_race_dates()
-
-if not race_dates:
-  st.warning(
-      "No race data found in Neon DB. Please check database connection or run"
-      " pipeline."
-  )
-  st.stop()
-
-col_date, col_race = st.columns([2, 1])
-
-with col_date:
-  selected_date = st.selectbox("📅 Select Race Meeting Date", race_dates)
-
-with col_race:
-  selected_race_no = st.selectbox(
-      "🏁 Select Race Number", list(range(1, 12)), index=0
-  )
-
-# Fetch Data
-df_race = load_race_data(selected_date, selected_race_no)
-
-if df_race.empty:
-  st.info(
-      f"No runners found for Date: {selected_date} | Race {selected_race_no}"
-  )
-  st.stop()
-
-# ==========================================
-# FAST MANUAL ODDS OVERRIDE (SIDEBAR)
-# ==========================================
-manual_odds_active = False
-
-with st.sidebar:
-  st.header("⚡ Fast Odds Override")
-  st.caption("Input format: `1=4.5, 2=12, 3=2.1`")
-  
-  manual_odds_str = st.text_area(
-      "Type Live Odds Here:", 
-      height=120,
-      placeholder="1=3.5\n2=4.0\n3=12"
-  )
-  
-  if manual_odds_str.strip():
-    # Use Regex to intelligently find all "number=number" patterns
-    matches = re.findall(r"(\d+)\s*[=:]\s*(\d+(?:\.\d+)?)", manual_odds_str)
+    """Attempts connection to Streamlit Secrets / Cloud DB first, falling back to local NAS DB."""
+    neon_url = st.secrets.get("NEON_DB_URL", os.environ.get("NEON_DB_URL", NEON_DB_URL_DEFAULT))
     
-    if matches:
-      for h_str, odds_str in matches:
-        h_no = int(h_str)
-        odds_val = float(odds_str)
-        # Update the live odds in the dataframe memory directly
-        df_race.loc[df_race["horse_no"] == h_no, "live_odds"] = odds_val
-      
-      manual_odds_active = True
-      st.success(f"✅ Applied manual odds for {len(matches)} horses!")
-    else:
-      st.error("⚠️ Invalid format. Example: 1=4.5, 2=12")
+    try:
+        conn = psycopg2.connect(neon_url, connect_timeout=5)
+        return conn, "Neon Cloud DB"
+    except Exception:
+        try:
+            conn = psycopg2.connect(**NAS_DB_CONFIG)
+            return conn, "Local NAS DB"
+        except Exception as e:
+            st.error(f"⚠️ Critical Database Connection Failure: {e}")
+            st.stop()
 
-# Auto-detect race class
-race_class = (
-    df_race["race_class"].iloc[0]
-    if "race_class" in df_race.columns
-    else "Class 3"
-)
-dynamic_ev_min = get_dynamic_ev_threshold(race_class)
+@st.cache_data(ttl=15)
+def load_race_dates():
+    """Fetches all unique available race meeting dates from PostgreSQL."""
+    conn, db_source = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT DISTINCT race_date FROM model_pwin_results ORDER BY race_date DESC;")
+    rows = cur.fetchall()
+    cur.close()
+    return [str(r[0]) for r in rows], db_source
 
-# Apply Kelly & EV calculations using potentially overridden odds
-df_calc = calculate_kelly_and_ev(df_race, bankroll=10000, kelly_fraction=0.25)
+@st.cache_data(ttl=10)
+def load_meeting_data(selected_date):
+    """Fetches race card details and model probabilities for the selected date."""
+    conn, _ = get_db_connection()
+    query = """
+        SELECT race_no, horse_no, horse_name, rating, carried_weight, 
+               draw, jt_win_pct, raw_score, model_pwin, fair_odds, live_odds
+        FROM model_pwin_results
+        WHERE race_date = %s
+        ORDER BY race_no ASC, horse_no ASC;
+    """
+    df = pd.read_sql_query(query, conn, params=(selected_date,))
+    return df
 
-# ==========================================
-# ODDS INGESTION STATUS INDICATOR BAR
-# ==========================================
-has_db_live_odds = (
-    df_calc["live_odds"] > 0
-).any() and not (df_calc["live_odds"] == 10.0).all()
+# ==============================================================================
+# SIDEBAR CONTROL PANEL
+# ==============================================================================
+st.sidebar.title("🏇 HKJC Quant Control")
 
-col_m1, col_m2, col_m3 = st.columns(3)
+available_dates, db_source_name = load_race_dates()
+st.sidebar.caption(f"Connected to: **{db_source_name}**")
 
-with col_m1:
-  if manual_odds_active:
-    st.markdown(
-        '<div class="status-badge-blue">⚡ Manual Odds Override Active</div>',
-        unsafe_allow_html=True,
-    )
-  elif has_db_live_odds:
-    st.markdown(
-        '<div class="status-badge-green">🟢 DB Live Odds Active</div>',
-        unsafe_allow_html=True,
-    )
-  else:
-    st.markdown(
-        '<div class="status-badge-yellow">🟡 Pending Live Odds</div>',
-        unsafe_allow_html=True,
-    )
+if not available_dates:
+    st.sidebar.warning("No race date records found in database.")
+    st.stop()
 
-with col_m2:
-  st.markdown(f"**Total Field:** `{len(df_calc)} Runners`")
+selected_date = st.sidebar.selectbox("📅 Select Race Meeting Date", available_dates, index=0)
 
-with col_m3:
-  st.markdown(
-      f"**Class Filter:** `{race_class}` | Min EV: `≥ +{dynamic_ev_min:.2f}`"
-  )
+st.sidebar.markdown("---")
+st.sidebar.subheader("⚙️ Staking Parameters")
+bankroll = st.sidebar.number_input("Total Bankroll ($HKD)", min_value=1000, max_value=500000, value=5000, step=1000)
+ev_threshold = st.sidebar.slider("Min WIN EV Edge Threshold", min_value=0.05, max_value=0.50, value=0.20, step=0.05)
+exotic_confidence_threshold = st.sidebar.slider("Min Exotic Box 4 PWIN Sum", min_value=0.35, max_value=0.65, value=0.50, step=0.05)
 
-st.markdown("<br>", unsafe_allow_html=True)
+if st.sidebar.button("🔄 Refresh Live Odds"):
+    st.cache_data.clear()
+    st.rerun()
 
-# ==========================================
-# 2-MINUTE EXECUTIVE BET SLIP
-# ==========================================
-st.subheader(
-    f"🚨 2-Minute Executive Bet Slip — {selected_date} | Race {selected_race_no}"
-)
+# ==============================================================================
+# MAIN DASHBOARD HEADING & EXECUTIVE SUMMARY
+# ==============================================================================
+st.title("🏇 HKJC Quant PWIN Super-Computer Dashboard v200.6")
+st.caption(f"Active Race Meeting: **{selected_date}** | Automated Fractional Kelly & Dynamic Confidence Filters")
 
-col_win, col_exotics = st.columns([1, 1])
+raw_df = load_meeting_data(selected_date)
 
-# --- 1. TOP WIN VALUE BETS (PRIME OVERLAYS) ---
-with col_win:
-  st.markdown("### 🏆 Top WIN Value Bets (Max 3 Prime Overlays)")
+if raw_df.empty:
+    st.warning(f"No race data available for date: {selected_date}")
+    st.stop()
 
-  df_prime = df_calc[
-      (df_calc["model_pwin"] >= 0.08)
-      & (df_calc["live_odds"] <= 35.0)
-      & (df_calc["live_odds"] > 0)
-      & (df_calc["ev_edge"] >= dynamic_ev_min)
-      & (df_calc["ev_edge"] <= 2.50)
-  ].copy()
+# Group runners by Race Number
+race_numbers = sorted(raw_df['race_no'].unique())
 
-  if not df_prime.empty:
-    df_prime = df_prime.sort_values(by="ev_edge", ascending=False).head(3)
+# Pre-calculate Global Executive Metrics
+total_win_bets = 0
+total_exotic_races = 0
+total_recommended_stake = 0.0
 
-    display_win = pd.DataFrame({
-        "Horse": df_prime["horse_no"].astype(str)
-        + " "
-        + df_prime["horse_name"],
-        "Live Odds": df_prime["live_odds"].map("{:.1f}".format),
-        "EV Edge": df_prime["ev_edge"].map("+{:.2f}".format),
-        "Bet Stake ($)": df_prime["bet_stake"].map("${:,.0f}".format),
-    })
+for r_no in race_numbers:
+    r_df = raw_df[raw_df['race_no'] == r_no].copy()
+    pwins = r_df['model_pwin'].astype(float).tolist()
+    harville_sum = sum(p / (1.0 - p) for p in pwins if p < 1.0)
+    
+    r_df['p_top2'] = r_df['model_pwin'].apply(lambda p: p * (1.0 + (harville_sum - (p / (1.0 - p)))) if p < 1.0 else p)
+    sorted_top2 = r_df.sort_values(by='p_top2', ascending=False)
+    top4_pwin_sum = sorted_top2.head(4)['model_pwin'].sum()
+    
+    if top4_pwin_sum >= exotic_confidence_threshold:
+        total_exotic_races += 1
+        
+    for _, h in r_df.iterrows():
+        pwin = float(h['model_pwin'] or 0.0)
+        odds = float(h['live_odds'] or 0.0)
+        if pwin >= 0.08 and 1.0 < odds <= 35.0:
+            ev_edge = (pwin * odds) - 1.0
+            if ev_threshold <= ev_edge <= 2.50:
+                b = odds - 1.0
+                f_kelly = max(0.0, (b * pwin - (1.0 - pwin)) / b)
+                stake = round(f_kelly * bankroll * 0.25)
+                if stake >= 50:
+                    total_win_bets += 1
+                    total_recommended_stake += stake
 
-    st.table(display_win)
-  else:
-    st.info(
-        f"⚠️ No qualified Prime Overlays (PWIN ≥ 8%, Odds ≤ 35, EV between"
-        f" +{dynamic_ev_min:.2f} and +2.50) found. Skip WIN bets for this race."
-    )
+# Render Metric Bar
+mcol1, mcol2, mcol3, mcol4 = st.columns(4)
+mcol1.metric("Total Races Today", f"{len(race_numbers)} Races")
+mcol2.metric("WIN Overlay Signals", f"{total_win_bets} Bets")
+mcol3.metric("Exotics Box 4 Signals", f"{total_exotic_races} Races")
+mcol4.metric("Total Recommended Stake", f"${total_recommended_stake:,.0f} HKD")
 
-# --- 2. EXOTICS STRATEGY (BOX 4 COMBINATION) ---
-with col_exotics:
-  st.markdown("### 🎯 Exotics Strategy (Box 4 Combination)")
-
-  top_pwin = df_calc.sort_values(by="model_pwin", ascending=False).head(2)
-
-  if not df_prime.empty:
-    top_overlays = df_prime.head(2)
-    box_candidates = (
-        pd.concat([top_pwin, top_overlays])
-        .drop_duplicates(subset=["horse_no"])
-        .head(4)
-    )
-  else:
-    box_candidates = (
-        df_calc.sort_values(by="model_pwin", ascending=False)
-        .drop_duplicates(subset=["horse_no"])
-        .head(4)
-    )
-
-  box_numbers = [f"#{int(h)}" for h in box_candidates["horse_no"].tolist()]
-  st.success(
-      f"**Box 4 Selections: ({', '.join(box_numbers)})** — Max 6 Combinations"
-  )
-
-  if len(box_candidates) >= 2:
-    p1 = box_candidates.iloc[0]
-    p2 = box_candidates.iloc[1]
-
-    prob_q = (p1["model_pwin"] * p2["model_pwin"]) / (
-        1.0 - p1["model_pwin"] + 1e-6
-    )
-    prob_pq = prob_q * 2.2
-
-    fair_q_odds = 1.0 / prob_q if prob_q > 0 else 999.0
-    fair_pq_odds = 1.0 / prob_pq if prob_pq > 0 else 999.0
-
-    exotic_df = pd.DataFrame([
-        {
-            "Type": "Quinella (Q) Best Pair",
-            "Pair": f"{int(p1['horse_no'])}-{int(p2['horse_no'])}",
-            "Runners": (
-                f"#{int(p1['horse_no'])} {p1['horse_name']} + "
-                f"#{int(p2['horse_no'])} {p2['horse_name']}"
-            ),
-            "Fair Min Odds": f"${fair_q_odds:.2f}",
-        },
-        {
-            "Type": "Place Quinella (PQ) Best",
-            "Pair": f"{int(p1['horse_no'])}-{int(p2['horse_no'])}",
-            "Runners": (
-                f"#{int(p1['horse_no'])} {p1['horse_name']} + "
-                f"#{int(p2['horse_no'])} {p2['horse_name']}"
-            ),
-            "Fair Min Odds": f"${fair_pq_odds:.2f}",
-        },
-    ])
-
-    st.table(exotic_df)
-
-# ==========================================
-# FULL FIELD LIVE ODDS & VERIFICATION MATRIX
-# ==========================================
 st.markdown("---")
-with st.expander("📋 Full Field Live Odds & Model Verification Table", expanded=True):
-  df_display_all = df_calc.copy()
 
-  def get_value_status(row):
-    if row["live_odds"] <= 0 or row["live_odds"] == 10.0:
-      return "🟡 Pending Odds"
-    elif row["ev_edge"] >= dynamic_ev_min:
-      return "🟢 Prime Overlay"
-    elif row["ev_edge"] > 0:
-      return "🔵 Slight Edge"
-    else:
-      return "🔴 Underlay"
+# ==============================================================================
+# RACE TAB NAVIGATION & BET SLIP RENDERER
+# ==============================================================================
+tabs = st.tabs([f"Race {r_no}" for r_no in race_numbers])
 
-  df_display_all["Status"] = df_display_all.apply(get_value_status, axis=1)
+for idx, r_no in enumerate(race_numbers):
+    with tabs[idx]:
+        r_df = raw_df[raw_df['race_no'] == r_no].copy()
+        
+        # 1. Calculate Harville Top-2 Finish Probabilities
+        pwins = r_df['model_pwin'].astype(float).tolist()
+        harville_sum = sum(p / (1.0 - p) for p in pwins if p < 1.0)
+        
+        r_df['p_top2'] = r_df['model_pwin'].apply(
+            lambda p: round(min(p * (1.0 + (harville_sum - (p / (1.0 - p)))), 0.999), 4) if p < 1.0 else p
+        )
+        
+        # 2. Identify Qualified WIN Value Overlays
+        win_overlays = []
+        for _, h in r_df.iterrows():
+            pwin = float(h['model_pwin'] or 0.0)
+            odds = float(h['live_odds'] or 0.0)
+            
+            if pwin >= 0.08 and 1.0 < odds <= 35.0:
+                ev_edge = (pwin * odds) - 1.0
+                if ev_threshold <= ev_edge <= 2.50:
+                    b = odds - 1.0
+                    f_kelly = max(0.0, (b * pwin - (1.0 - pwin)) / b)
+                    stake = round(f_kelly * bankroll * 0.25)
+                    if stake >= 50:
+                        win_overlays.append({
+                            "horse_no": int(h['horse_no']),
+                            "horse_name": h['horse_name'],
+                            "odds": odds,
+                            "pwin": pwin,
+                            "ev_edge": ev_edge,
+                            "stake": stake
+                        })
+                        
+        win_overlays = sorted(win_overlays, key=lambda x: x['ev_edge'], reverse=True)[:3]
+        
+        # 3. Identify Top 4 Harville Exotic Candidates
+        sorted_top2 = r_df.sort_values(by='p_top2', ascending=False)
+        top4_pwin_sum = sorted_top2.head(4)['model_pwin'].sum()
+        exotic_box = sorted_top2.head(4)['horse_no'].astype(int).tolist()
 
-  df_table = pd.DataFrame({
-      "No.": df_display_all["horse_no"].astype(int),
-      "Horse": df_display_all["horse_name"],
-      "Draw": df_display_all["draw"].astype(int),
-      "Model PWIN %": (df_display_all["model_pwin"] * 100).map("{:.1f}%".format),
-      "Fair Odds": df_display_all["fair_odds"].map("${:.2f}".format),
-      "Live Odds": df_display_all["live_odds"].apply(
-          lambda x: f"${x:.1f}" if x > 0 else "N/A"
-      ),
-      "EV Edge": df_display_all["ev_edge"].apply(
-          lambda x: f"+{x:.2f}" if x > -1 else "N/A"
-      ),
-      "Status": df_display_all["Status"],
-  })
+        # ----------------------------------------------------------------------
+        # VISUAL UI BADGES (2-COLUMN RECOMMENDATION SLIP)
+        # ----------------------------------------------------------------------
+        st.subheader(f"⚡ Race {r_no} Live Recommendation Slip")
+        col_win, col_exotic = st.columns(2)
 
-  st.dataframe(df_table, use_container_width=True, hide_index=True)
+        # --- WIN BET COLUMN ---
+        with col_win:
+            st.markdown("##### 🎯 WIN Bet Recommendation")
+            if win_overlays:
+                st.success(f"🟢 **WIN GO SIGNAL** ({len(win_overlays)} Overlay Found)")
+                for bet in win_overlays:
+                    st.markdown(
+                        f"""
+                        <div class="go-badge">
+                            <span style="color: #ffffff; font-weight: bold; font-size: 17px;">
+                                #{bet['horse_no']} {bet['horse_name']}
+                            </span><br/>
+                            <span style="color: #3fb950; font-weight: bold;">Live Odds: ${bet['odds']:.1f}</span> | 
+                            <span style="color: #58a6ff;">EV Edge: +{bet['ev_edge']:.2f}</span> | 
+                            <span style="color: #d2a8ff;">Model PWIN: {bet['pwin']:.1%}</span><br/>
+                            <span style="color: #e6edf3; font-size: 15px;">Recommended Stake: <b>${bet['stake']} HKD</b></span>
+                        </div>
+                        """, 
+                        unsafe_allow_html=True
+                    )
+            else:
+                st.markdown(
+                    f"""
+                    <div class="neutral-badge">
+                        <span style="color: #8b949e; font-size: 15px;">⚪ <b>NO WIN BET</b></span><br/>
+                        <span style="color: #c9d1d9; font-size: 13px;">No runners meet the strictly required EV edge threshold (EV &ge; +{ev_threshold:.2f}).</span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+        # --- EXOTICS BOX COLUMN ---
+        with col_exotic:
+            st.markdown("##### 🎲 Box 4 Exotics Recommendation")
+            if top4_pwin_sum >= exotic_confidence_threshold:
+                st.success(f"🟢 **EXOTICS GO SIGNAL** (Top 4 Confidence: {top4_pwin_sum:.1%})")
+                st.markdown(
+                    f"""
+                    <div class="go-badge">
+                        <span style="color: #8b949e; font-size: 13px;">Target Quinella / QP Box 4 Selections:</span><br/>
+                        <span style="color: #3fb950; font-size: 24px; font-weight: bold;">
+                            {exotic_box}
+                        </span><br/>
+                        <span style="color: #e6edf3; font-size: 13px;">Top 4 Combined Win Probability: <b>{top4_pwin_sum:.1%}</b> (&ge; {exotic_confidence_threshold:.0%})</span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+            else:
+                st.markdown(
+                    f"""
+                    <div class="skip-badge">
+                        <span style="color: #f85149; font-weight: bold; font-size: 15px;">🔴 EXOTICS SKIP</span><br/>
+                        <span style="color: #c9d1d9; font-size: 13px;">Low Confidence ({top4_pwin_sum:.1%} &lt; {exotic_confidence_threshold:.0%}). Win probability is spread thin across the field. Save exotic capital.</span><br/>
+                        <span style="color: #8b949e; font-size: 12px;">Raw Top 4 Harville Rank: {exotic_box}</span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+        # ----------------------------------------------------------------------
+        # DETAILED RACE FIELD MATRIX TABLE
+        # ----------------------------------------------------------------------
+        st.markdown("##### 📊 Full Field Probability & Edge Matrix")
+        
+        r_df['ev_edge'] = (r_df['model_pwin'] * r_df['live_odds']) - 1.0
+        r_df['kelly_stake'] = r_df.apply(
+            lambda h: round(max(0.0, ((h['live_odds'] - 1.0) * h['model_pwin'] - (1.0 - h['model_pwin'])) / (h['live_odds'] - 1.0)) * bankroll * 0.25)
+            if (h['model_pwin'] >= 0.08 and 1.0 < h['live_odds'] <= 35.0 and h['ev_edge'] >= ev_threshold) else 0,
+            axis=1
+        )
+        
+        # Format Data for Clean Table Display
+        display_df = pd.DataFrame({
+            "No.": r_df['horse_no'].astype(int),
+            "Horse Name": r_df['horse_name'],
+            "Rating": r_df['rating'].astype(int),
+            "Draw": r_df['draw'].astype(int),
+            "Model PWIN": r_df['model_pwin'].map(lambda x: f"{x:.1%}"),
+            "Harville Top-2": r_df['p_top2'].map(lambda x: f"{x:.1%}"),
+            "Fair Odds": r_df['fair_odds'].map(lambda x: f"${x:.2f}"),
+            "Live Odds": r_df['live_odds'].map(lambda x: f"${x:.1f}" if x > 0 else "N/A"),
+            "EV Edge": r_df['ev_edge'].map(lambda x: f"+{x:.2f}" if x > 0 else f"{x:.2f}"),
+            "Kelly Stake": r_df['kelly_stake'].map(lambda x: f"${x:.0f}" if x >= 50 else "-")
+        })
+
+        st.dataframe(
+            display_df.sort_values(by="Model PWIN", ascending=False),
+            use_container_width=True,
+            hide_index=True
+        )s
