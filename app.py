@@ -81,17 +81,25 @@ def get_db_connection():
 
 @st.cache_data(ttl=15)
 def load_race_dates():
-  conn, db_source = get_db_connection()
-  cur = conn.cursor()
-  cur.execute("SELECT DISTINCT race_date FROM model_pwin_results ORDER BY race_date DESC;")
-  rows = cur.fetchall()
-  cur.close()
-  return [str(r[0]) for r in rows], db_source
+  try:
+    conn, db_source = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT DISTINCT race_date FROM model_pwin_results ORDER BY race_date DESC;")
+    rows = cur.fetchall()
+    cur.close()
+    return [str(r[0]) for r in rows], db_source
+  except (psycopg2.InterfaceError, psycopg2.OperationalError):
+    st.cache_resource.clear()
+    conn, db_source = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT DISTINCT race_date FROM model_pwin_results ORDER BY race_date DESC;")
+    rows = cur.fetchall()
+    cur.close()
+    return [str(r[0]) for r in rows], db_source
 
 
 @st.cache_data(ttl=10)
 def load_meeting_data(selected_date):
-  conn, _ = get_db_connection()
   query = """
         SELECT race_no, horse_no, horse_name, rating, carried_weight, 
                draw, jt_win_pct, raw_score, model_pwin, fair_odds, live_odds
@@ -99,13 +107,20 @@ def load_meeting_data(selected_date):
         WHERE race_date = %s
         ORDER BY race_no ASC, horse_no ASC;
     """
-  df = pd.read_sql_query(query, conn, params=(selected_date,))
-  return df
+  try:
+    conn, _ = get_db_connection()
+    df = pd.read_sql_query(query, conn, params=(selected_date,))
+    return df
+  except (psycopg2.InterfaceError, psycopg2.OperationalError):
+    st.cache_resource.clear()
+    conn, _ = get_db_connection()
+    df = pd.read_sql_query(query, conn, params=(selected_date,))
+    return df
 
 
 def update_single_race_odds(target_date, race_no, odds_map):
   """Saves manual odds input directly to PostgreSQL DB and syncs to Cloud.
-  Explicitly converts all NumPy types to standard Python int/float/str to avoid psycopg2 adapter errors.
+  Includes auto-retry logic for dropped DB connections and explicit Python type conversion.
   """
   update_payload = [
       (float(odds), str(target_date), int(race_no), int(h_no))
@@ -124,7 +139,13 @@ def update_single_race_odds(target_date, race_no, odds_map):
     cur.executemany(update_query, update_payload)
     conn.commit()
     cur.close()
-    conn.close()
+  except (psycopg2.InterfaceError, psycopg2.OperationalError):
+    st.cache_resource.clear()
+    conn, db_source = get_db_connection()
+    cur = conn.cursor()
+    cur.executemany(update_query, update_payload)
+    conn.commit()
+    cur.close()
   except Exception as e:
     st.error(f"Error saving odds to primary database: {e}")
 
