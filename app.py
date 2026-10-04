@@ -103,6 +103,39 @@ def load_meeting_data(selected_date):
   return df
 
 
+def update_single_race_odds(target_date, race_no, odds_map):
+  """Saves manual odds input directly to PostgreSQL DB and syncs to Cloud."""
+  update_payload = [(float(odds), target_date, race_no, int(h_no)) for h_no, odds in odds_map.items()]
+  update_query = """
+        UPDATE model_pwin_results
+        SET live_odds = %s
+        WHERE race_date = %s AND race_no = %s AND horse_no = %s;
+    """
+  
+  # 1. Update primary connection (Cloud DB or Local NAS)
+  try:
+    conn, db_source = get_db_connection()
+    cur = conn.cursor()
+    cur.executemany(update_query, update_payload)
+    conn.commit()
+    cur.close()
+    conn.close()
+  except Exception as e:
+    st.error(f"Error saving odds to primary database: {e}")
+
+  # 2. Mirror to Neon Cloud DB if connected to local
+  neon_url = st.secrets.get("NEON_DB_URL", os.environ.get("NEON_DB_URL", NEON_DB_URL_DEFAULT))
+  try:
+    cloud_conn = psycopg2.connect(neon_url, connect_timeout=3)
+    cloud_cur = cloud_conn.cursor()
+    cloud_cur.executemany(update_query, update_payload)
+    cloud_conn.commit()
+    cloud_cur.close()
+    cloud_conn.close()
+  except Exception:
+    pass
+
+
 # ==============================================================================
 # SIDEBAR CONTROL PANEL
 # ==============================================================================
@@ -287,6 +320,37 @@ with main_nav1:
                 unsafe_allow_html=True,
             )
 
+        # ----------------------------------------------------------------------
+        # NEW: MANUAL ODDS OVERRIDE EXPANDER
+        # ----------------------------------------------------------------------
+        with st.expander(f"✏️ Manual Odds Override for Race {r_no}"):
+          st.caption("Input or edit live tote odds below. Click 'Save Odds' to update calculations instantly.")
+          
+          edit_df = r_df[["horse_no", "horse_name", "fair_odds", "live_odds"]].copy()
+          edit_df.columns = ["No.", "Horse Name", "Fair Odds", "Live Odds"]
+          
+          edited_data = st.data_editor(
+              edit_df,
+              column_config={
+                  "No.": st.column_config.NumberColumn(disabled=True),
+                  "Horse Name": st.column_config.TextColumn(disabled=True),
+                  "Fair Odds": st.column_config.NumberColumn(disabled=True, format="$%.2f"),
+                  "Live Odds": st.column_config.NumberColumn("Live Odds ($)", min_value=1.0, max_value=999.0, step=0.1, format="$%.1f"),
+              },
+              hide_index=True,
+              key=f"editor_race_{r_no}"
+          )
+          
+          if st.button(f"💾 Save Race {r_no} Odds & Recalculate Stakes", key=f"btn_race_{r_no}"):
+            odds_map = dict(zip(edited_data["No."], edited_data["Live Odds"]))
+            update_single_race_odds(selected_date, r_no, odds_map)
+            st.cache_data.clear()
+            st.success(f"Successfully updated odds for Race {r_no}!")
+            st.rerun()
+
+        # ----------------------------------------------------------------------
+        # DETAILED RACE FIELD MATRIX TABLE
+        # ----------------------------------------------------------------------
         st.markdown("##### 📊 Full Field Probability & Edge Matrix")
 
         r_df["ev_edge"] = (r_df["model_pwin"] * r_df["live_odds"]) - 1.0
