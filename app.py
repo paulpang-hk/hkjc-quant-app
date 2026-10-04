@@ -32,7 +32,7 @@ st.markdown(
 )
 
 # ==============================================================================
-# DATABASE CONNECTION MANAGER
+# DATABASE CONNECTION MANAGER & CONSTANTS
 # ==============================================================================
 NEON_DB_URL_DEFAULT = "postgresql://neondb_owner:npg_D2YzinaM8grT@ep-snowy-fire-b59poqzm-pooler.c-7.us-east-2.aws.neon.tech/neondb?sslmode=require"
 
@@ -104,14 +104,19 @@ def load_meeting_data(selected_date):
 
 
 def update_single_race_odds(target_date, race_no, odds_map):
-  """Saves manual odds input directly to PostgreSQL DB and syncs to Cloud."""
-  update_payload = [(float(odds), target_date, race_no, int(h_no)) for h_no, odds in odds_map.items()]
+  """Saves manual odds input directly to PostgreSQL DB and syncs to Cloud.
+  Explicitly converts all NumPy types to standard Python int/float/str to avoid psycopg2 adapter errors.
+  """
+  update_payload = [
+      (float(odds), str(target_date), int(race_no), int(h_no))
+      for h_no, odds in odds_map.items()
+  ]
   update_query = """
         UPDATE model_pwin_results
         SET live_odds = %s
         WHERE race_date = %s AND race_no = %s AND horse_no = %s;
     """
-  
+
   # 1. Update primary connection (Cloud DB or Local NAS)
   try:
     conn, db_source = get_db_connection()
@@ -177,9 +182,10 @@ with main_nav1:
   if raw_df.empty:
     st.warning(f"No race data available for date: {selected_date}")
   else:
-    race_numbers = sorted(raw_df["race_no"].unique())
+    # Explicit conversion to standard Python integers
+    race_numbers = [int(r) for r in sorted(raw_df["race_no"].unique())]
 
-    # Pre-calculate Global Metrics
+    # Pre-calculate Global Executive Metrics
     total_win_bets = 0
     total_exotic_races = 0
     total_recommended_stake = 0.0
@@ -321,14 +327,15 @@ with main_nav1:
             )
 
         # ----------------------------------------------------------------------
-        # NEW: MANUAL ODDS OVERRIDE EXPANDER
+        # MANUAL ODDS OVERRIDE EXPANDER
         # ----------------------------------------------------------------------
         with st.expander(f"✏️ Manual Odds Override for Race {r_no}"):
           st.caption("Input or edit live tote odds below. Click 'Save Odds' to update calculations instantly.")
-          
+
           edit_df = r_df[["horse_no", "horse_name", "fair_odds", "live_odds"]].copy()
+          edit_df["horse_no"] = edit_df["horse_no"].astype(int)
           edit_df.columns = ["No.", "Horse Name", "Fair Odds", "Live Odds"]
-          
+
           edited_data = st.data_editor(
               edit_df,
               column_config={
@@ -340,7 +347,7 @@ with main_nav1:
               hide_index=True,
               key=f"editor_race_{r_no}"
           )
-          
+
           if st.button(f"💾 Save Race {r_no} Odds & Recalculate Stakes", key=f"btn_race_{r_no}"):
             odds_map = dict(zip(edited_data["No."], edited_data["Live Odds"]))
             update_single_race_odds(selected_date, r_no, odds_map)
@@ -399,7 +406,7 @@ with main_nav2:
     st.info(f"No historical database records for meeting: {audit_date}")
   else:
     official_dict = HISTORICAL_OFFICIAL_RESULTS.get(audit_date, {})
-    a_races = sorted(audit_df["race_no"].unique())
+    a_races = [int(r) for r in sorted(audit_df["race_no"].unique())]
 
     win_outlay, win_payout = 0.0, 0.0
     exotic_outlay, exotic_payout = 0.0, 0.0
