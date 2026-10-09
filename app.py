@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import psycopg2
+import re
 from psycopg2.extras import execute_batch
 
 DB_URL = "postgresql://neondb_owner:npg_D2YzinaM8grT@ep-snowy-fire-b59poqzm-pooler.c-7.us-east-2.aws.neon.tech/neondb?sslmode=require"
@@ -20,20 +21,15 @@ def load_data():
         """
         return pd.read_sql(query, conn)
 
-def update_manual_odds(updated_data, race_date, race_no):
-    """Pushes manually edited odds back to Neon DB and recalculates P_win/Kelly"""
-    updates = []
-    for _, row in updated_data.iterrows():
-        odds_val = float(row['live_odds']) if pd.notna(row['live_odds']) and row['live_odds'] > 0 else None
-        updates.append((odds_val, race_date, race_no, row['horse_no']))
-        
+def update_manual_odds_batch(batch_updates, race_date, race_no):
+    """Pushes a list of (odds, race_date, race_no, horse_no) tuples directly to Neon DB"""
     sql = """
         UPDATE model_pwin_results 
         SET live_odds = %s, updated_at = CURRENT_TIMESTAMP
         WHERE race_date = %s AND race_no = %s AND horse_no = %s;
     """
     with psycopg2.connect(DB_URL) as conn, conn.cursor() as cur:
-        execute_batch(cur, sql, updates)
+        execute_batch(cur, sql, batch_updates)
 
 try:
     df = load_data()
@@ -100,40 +96,58 @@ try:
 
         st.divider()
 
-        # --- INTERACTIVE TABLE & OVERRIDE ---
-        st.markdown("### 📊 Interactive Racecard & Odds Override")
-        st.caption("💡 You can double-click any cell in the **Live Odds** column below to manually enter/edit odds, then click 'Save Manual Odds'.")
+        # --- QUICK TEXT-INPUT ODDS OVERRIDE ---
+        st.markdown("### ⚡ Quick Odds Entry")
+        st.caption("Format: `1=1.3, 2=7, 3=100` or `1=1.3 2=7 3=100` (Horse No = Odds)")
         
-        # Format columns for editing display
-        edit_df = race_df[['horse_no', 'horse_name', 'draw', 'rating', 'model_pwin', 'fair_odds', 'live_odds', 'EV', 'Recommended_Stake']].copy()
+        quick_odds_input = st.text_input(f"Enter Race {selected_race} Odds:", placeholder="e.g. 1=1.3, 2=7, 3=100, 4=15.5")
         
-        edited_df = st.data_editor(
-            edit_df,
+        if st.button("🚀 Apply Quick Odds Update"):
+            if quick_odds_input.strip():
+                # Extract all pairs matching digit=decimal_or_int
+                matches = re.findall(r"(\d+)\s*=\s*(\d+(?:\.\d+)?)", quick_odds_input)
+                if matches:
+                    batch_updates = []
+                    for h_no_str, odds_str in matches:
+                        h_no = int(h_no_str)
+                        odds_val = float(odds_str)
+                        batch_updates.append((odds_val, target_date, selected_race, h_no))
+                    
+                    try:
+                        update_manual_odds_batch(batch_updates, target_date, selected_race)
+                        st.success(f"✅ Updated {len(batch_updates)} horses for Race {selected_race}!")
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as ex:
+                        st.error(f"Failed to update odds: {ex}")
+                else:
+                    st.warning("⚠️ Invalid format. Example format: `1=1.3, 2=7, 3=100`")
+            else:
+                st.warning("⚠️ Please type some odds first.")
+
+        st.divider()
+
+        # --- TABLE VIEW ---
+        st.markdown("### 📊 Racecard Overview")
+        
+        display_df = race_df[['horse_no', 'horse_name', 'draw', 'rating', 'model_pwin', 'fair_odds', 'live_odds', 'EV', 'Recommended_Stake']].copy()
+        
+        st.dataframe(
+            display_df,
             column_config={
-                "horse_no": st.column_config.NumberColumn("No.", disabled=True),
-                "horse_name": st.column_config.TextColumn("Horse Name", disabled=True),
-                "draw": st.column_config.NumberColumn("Draw", disabled=True),
-                "rating": st.column_config.NumberColumn("Rtg", disabled=True),
-                "model_pwin": st.column_config.NumberColumn("P(win)", format="%.3f", disabled=True),
-                "fair_odds": st.column_config.NumberColumn("Fair Odds", format="%.1f", disabled=True),
-                "live_odds": st.column_config.NumberColumn("Live Odds (Editable)", format="%.1f", min_value=1.0, max_value=999.0),
-                "EV": st.column_config.NumberColumn("EV", format="%+.2f", disabled=True),
-                "Recommended_Stake": st.column_config.NumberColumn("Stake (HKD)", format="$%d", disabled=True),
+                "horse_no": st.column_config.NumberColumn("No."),
+                "horse_name": st.column_config.TextColumn("Horse Name"),
+                "draw": st.column_config.NumberColumn("Draw"),
+                "rating": st.column_config.NumberColumn("Rtg"),
+                "model_pwin": st.column_config.NumberColumn("P(win)", format="%.3f"),
+                "fair_odds": st.column_config.NumberColumn("Fair Odds", format="%.1f"),
+                "live_odds": st.column_config.NumberColumn("Live Odds", format="%.1f"),
+                "EV": st.column_config.NumberColumn("EV", format="%+.2f"),
+                "Recommended_Stake": st.column_config.NumberColumn("Stake (HKD)", format="$%d"),
             },
             hide_index=True,
-            use_container_width=True,
-            key=f"editor_race_{selected_race}"
+            use_container_width=True
         )
-        
-        # Save Button for Manual Overrides
-        if st.button("💾 Save Manual Odds & Update DB"):
-            try:
-                update_manual_odds(edited_df, target_date, selected_race)
-                st.success("✅ Manual odds saved! Refreshing database...")
-                st.cache_data.clear()
-                st.rerun()
-            except Exception as ex:
-                st.error(f"Failed to update odds: {ex}")
 
 except Exception as e:
     st.error(f"Error loading dashboard: {e}")
