@@ -4,7 +4,7 @@ import pandas as pd
 from itertools import combinations
 
 # ----------------------------------------------------------------------
-# 1. 頁面配置與 Neon DB 連線 (大寫 T 密碼)
+# 1. 頁面全屏寬度配置與 Neon DB 連線 (大寫 T 密碼)
 # ----------------------------------------------------------------------
 st.set_page_config(page_title="HKJC 量化博弈決策系統", layout="wide", page_icon="🏇")
 
@@ -14,10 +14,8 @@ st.title("🏇 HKJC 端到端量化博弈決策系統")
 st.caption("數據源：on.cc 即時賠率 | 核心算法：Softmax 三階段校準與 Quarter-Kelly 配置")
 
 # ----------------------------------------------------------------------
-# 2. 側邊欄控制項 (賽事選取與總本金設定)
+# 2. 頂部水平導航與控制卡 (Top Control Bar)
 # ----------------------------------------------------------------------
-st.sidebar.header("⚙️ 賽事與資金設定")
-
 try:
     with psycopg2.connect(DB_URL) as conn:
         dates_df = pd.read_sql("SELECT DISTINCT race_date FROM race_predictions ORDER BY race_date DESC;", conn)
@@ -30,12 +28,34 @@ if dates_df.empty:
     st.stop()
 
 available_dates = [str(d) for d in dates_df['race_date']]
-selected_date = st.sidebar.selectbox("選擇賽事日期", available_dates)
-selected_race = st.sidebar.slider("選擇場次", min_value=1, max_value=11, value=1)
-bankroll = st.sidebar.number_input("總投注本金 (HKD)", min_value=1000, max_value=1000000, value=10000, step=1000)
+
+# 頂部三等分欄位橫向排列
+col_date, col_race, col_bankroll = st.columns([1.2, 1.2, 1.2])
+
+with col_date:
+    selected_date = st.selectbox("📅 選擇賽事日期", available_dates)
+
+with col_race:
+    selected_race = st.selectbox(
+        "🏇 選擇場次 (Race)", 
+        options=list(range(1, 12)), 
+        format_func=lambda x: f"第 {x} 場 (Race {x})",
+        index=0
+    )
+
+with col_bankroll:
+    bankroll = st.number_input(
+        "💰 總投注本金 (HKD)", 
+        min_value=1000, 
+        max_value=1000000, 
+        value=10000, 
+        step=1000
+    )
+
+st.markdown("---")
 
 # ----------------------------------------------------------------------
-# 3. 讀取數據 (自動剔除退賽馬匹)
+# 3. 讀取數據 (自動剔除退賽馬匹 Anti-Scratched)
 # ----------------------------------------------------------------------
 with psycopg2.connect(DB_URL) as conn:
     sql = """
@@ -55,7 +75,7 @@ if df.empty:
     st.stop()
 
 # ----------------------------------------------------------------------
-# 4. 決策矩陣狀態判定 (預設值防禦)
+# 4. 決策矩陣狀態判定 (嚴禁低信心單膽 Anti-SPOF)
 # ----------------------------------------------------------------------
 sit_type = "WAITING"
 sit_title = "⏳ 等待 on.cc 即時賠率更新"
