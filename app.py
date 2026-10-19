@@ -173,4 +173,28 @@ def format_ev(val):
 
 def format_stake(val, total_bankroll):
     if pd.notnull(val) and val > 0:
-        actual_stake =
+        actual_stake = int(min(val, 0.05) * total_bankroll)
+        return f"${actual_stake}"
+    return "$0"
+
+disp = df.copy()
+disp['Softmax P_base'] = disp['p_base'].apply(format_pct)
+disp['精煉勝率 P_refined'] = disp['p_refined'].apply(format_pct)
+disp['Fair Odds'] = disp['fair_odds'].apply(format_odds)
+disp['on.cc 即時 Odds'] = disp['oncc_odds'].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else "N/A")
+disp['單馬 EV'] = disp['single_ev'].apply(format_ev)
+disp['Quarter-Kelly 注碼比'] = disp['kelly_pct'].apply(lambda x: f"{x * 100:.2f}%" if pd.notnull(x) else "0.00%")
+disp['建議注額 (HKD)'] = disp['kelly_pct'].apply(lambda x: format_stake(x, bankroll))
+
+out_table = disp[[
+    'horse_no', 'horse_name', 'draw', 'rating', 
+    'Softmax P_base', '精煉勝率 P_refined', 'Fair Odds', 
+    'on.cc 即時 Odds', '單馬 EV', 'Quarter-Kelly 注碼比', '建議注額 (HKD)'
+]].rename(columns={
+    'horse_no': '馬號',
+    'horse_name': '馬名',
+    'draw': '檔位',
+    'rating': '評分'
+})
+
+st.dataframe(out_table, use_container_width=True, hide_index=True)
